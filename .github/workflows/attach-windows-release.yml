@@ -1,0 +1,39 @@
+name: Attach Windows installers to Android release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing Android release tag, e.g. v1.0.1'
+        required: true
+      windows_run_id:
+        description: 'Successful Windows Desktop run ID built from this exact release commit/version'
+        required: true
+permissions:
+  contents: write
+  actions: read
+jobs:
+  attach:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate run, release commit, version and assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          WINDOWS_RUN_ID: ${{ inputs.windows_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$WINDOWS_RUN_ID" =~ ^[0-9]+$ ]]
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -Fx "XingChen-Assistant-${RELEASE_TAG}.apk"
+          TAG_SHA=$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)
+          RUN_SHA=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$WINDOWS_RUN_ID" --jq .head_sha)
+          RUN_STATUS=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$WINDOWS_RUN_ID" --jq .conclusion)
+          RUN_PATH=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$WINDOWS_RUN_ID" --jq .path)
+          test "$TAG_SHA" = "$RUN_SHA"
+          test "$RUN_STATUS" = success
+          test "$RUN_PATH" = .github/workflows/windows-desktop.yml
+          gh run download "$WINDOWS_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "XingChen-Assistant-${RELEASE_TAG}-Windows-x64" --dir output
+          test -s "output/XingChen-Assistant-${RELEASE_TAG}-Windows-x64.exe"
+          test -s "output/XingChen-Assistant-${RELEASE_TAG}-Windows-x64.msi"
+          gh release upload "$RELEASE_TAG" "output/XingChen-Assistant-${RELEASE_TAG}-Windows-x64.exe" "output/XingChen-Assistant-${RELEASE_TAG}-Windows-x64.msi" --repo "$GITHUB_REPOSITORY"

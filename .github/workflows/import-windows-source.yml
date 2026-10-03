@@ -1,0 +1,52 @@
+name: Import and verify Windows desktop source
+on:
+  push:
+    branches: [feature/windows-desktop]
+    paths: [windows-import.json]
+permissions:
+  contents: read
+jobs:
+  import:
+    if: github.ref == 'refs/heads/feature/windows-desktop'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      source_sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/windows-desktop
+      - name: Restore reviewed source files
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path.cwd().resolve()
+          entries = json.loads(Path('windows-import.json').read_text(encoding='utf-8'))
+          for name, content in entries.items():
+              relative = Path(name)
+              if relative.is_absolute() or '..' in relative.parts or relative.parts[0] in ('.git', '.github'):
+                  raise ValueError('Invalid source path')
+              path = (root / relative).resolve()
+              if root not in path.parents:
+                  raise ValueError('Source outside checkout')
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_text(content, encoding='utf-8')
+          Path('windows-import.json').unlink()
+          PY
+      - name: Commit only to desktop feature branch
+        id: commit
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add --all
+          git commit -m 'feat: import shared Kotlin and Windows Compose desktop implementation'
+          git push origin HEAD:feature/windows-desktop
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  verify:
+    needs: import
+    uses: ./.github/workflows/windows-desktop.yml
+    with:
+      source_ref: ${{ needs.import.outputs.source_sha }}
+      version: '1.0.0'
