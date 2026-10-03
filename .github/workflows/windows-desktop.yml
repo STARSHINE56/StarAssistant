@@ -25,6 +25,8 @@ env:
 jobs:
   windows:
     runs-on: windows-latest
+    env:
+      JAVA_TOOL_OPTIONS: "-Dfile.encoding=UTF-8"
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
