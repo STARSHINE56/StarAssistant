@@ -25,12 +25,12 @@ compose.desktop {
             targetFormats(TargetFormat.Exe, TargetFormat.Msi)
             packageName = "XingChen-Assistant"
             packageVersion = providers.gradleProperty("VERSION_NAME").orElse("1.0.0").get()
-            description = "星辰助手：分享解析与下载管理"
+            description = "XingChen Assistant: share link parsing and downloads"
             vendor = "STARSHINE56"
             modules("java.desktop", "java.net.http", "jdk.unsupported", "java.prefs", "jdk.crypto.ec")
             windows {
                 iconFile.set(project.file("src/main/resources/xingchen.ico"))
-                menuGroup = "星辰助手"
+                menuGroup = "XingChen Assistant"
                 shortcut = true
                 menu = true
                 perUserInstall = true
