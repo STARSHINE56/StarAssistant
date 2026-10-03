@@ -62,7 +62,11 @@ jobs:
         shell: pwsh
         run: |
           .\gradlew.bat --no-daemon --console=plain -PdesktopOnly=true "-PVERSION_NAME=$env:PACKAGE_VERSION" :desktopApp:packageExe :desktopApp:packageMsi
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE -ne 0) {
+            $packageExit = $LASTEXITCODE
+            Get-ChildItem desktopApp/build/compose/logs -Recurse -File | ForEach-Object { Write-Host $_.FullName; Get-Content $_.FullName }
+            exit $packageExit
+          }
           New-Item output -ItemType Directory -Force
           foreach ($extension in @('exe','msi')) {
             $file = Get-ChildItem desktopApp/build/compose/binaries/main/$extension -Filter "*.$extension" | Select-Object -First 1
@@ -83,6 +87,7 @@ jobs:
           path: |
             shared/build/reports/tests
             desktopApp/build/reports/tests
+            desktopApp/build/compose/logs
   android-regression:
     runs-on: ubuntu-latest
     timeout-minutes: 45
