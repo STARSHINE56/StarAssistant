@@ -45,8 +45,12 @@ jobs:
       - name: Install WiX 3 for jpackage
         shell: pwsh
         run: |
-          choco install wixtoolset --version=3.14.1 --yes --no-progress
           $wix = Get-ChildItem 'C:\Program Files (x86)' -Filter 'WiX Toolset v3*' -Directory | Select-Object -First 1
+          if (!$wix) {
+            choco install wixtoolset --version=3.14.1 --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $wix = Get-ChildItem 'C:\Program Files (x86)' -Filter 'WiX Toolset v3*' -Directory | Select-Object -First 1
+          }
           if (!$wix) { throw 'WiX 3 not found' }
           "$($wix.FullName)\bin" >> $env:GITHUB_PATH
       - name: Test and compile shared and desktop
