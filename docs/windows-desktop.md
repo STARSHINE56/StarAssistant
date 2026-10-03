@@ -1,13 +1,13 @@
 # Windows Desktop — implementation and verification status
 
-This branch is a development draft. It has **not** passed compilation, installation, Windows UI testing, or live authenticated drive acceptance. Do not describe it as a finished Windows release.
+This branch has passed shared/desktop unit tests, desktop compilation, and the three Android regression tasks in GitHub Actions. It remains a development draft pending installation, Windows UI and live authenticated drive acceptance. Do not describe those manual acceptance checks as completed.
 
 ## Layout and source sharing
 
 - `app`: existing Android application, same applicationId, signing, versions, UI and Room/SAF.
 - `shared`: Kotlin/JVM library. Its Gradle source set compiles the authoritative existing Android `data/network` and `*ResolveRepository` files, plus DownloadFailurePolicy/HlsDownloader/HlsRequestPolicy. It does not copy APIs or package Android UI/storage. Android continues compiling these exact source files in app; app does not depend on the JVM jar, avoiding duplicate classes and Android `org.json` replacement.
 - `desktopApp`: Compose Multiplatform 1.7.3/Kotlin 2.1.0/JDK 17 desktop UI, desktop storage, DPAPI encryption, persistent tasks and Windows integration.
-- Android changes: replace framework Base64 with Okio codec to retain API 23 compatibility; replace HLS Android logging with JVM logging and omit exception text containing URLs. All other Android implementation/configuration is unchanged. Regression results are still required.
+- Android changes: replace framework Base64 with Okio codec to retain API 23 compatibility; replace HLS Android logging with JVM logging and omit exception text containing URLs. All other Android implementation/configuration is unchanged. The three Android regression tasks passed in Actions.
 - JVM `DesktopFingerprint.kt` implements the platform-specific counterpart of Android SharedPreferences fingerprint persistence.
 
 ## Implemented paths, not live-verified capabilities
@@ -52,7 +52,7 @@ bash gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
 
 Existing Android Release workflow is untouched. After it publishes a signed APK, run Windows Desktop on the exact release commit with the same version; then `Attach Windows installers to Android release` validates commit, successful workflow, tag and APK before attaching EXE/MSI to that release. It does not overwrite existing assets or replace Android signing. Release secrets were not available for verification. Windows installers are not Authenticode signed.
 
-Artifact names (planned, none generated in this environment):
+Configured artifact names (check the latest successful Actions run for availability):
 
 - `XingChen-Assistant-vX.X.X-Windows-x64` containing `.exe` and `.msi`
 - `Windows-test-reports`
@@ -60,10 +60,10 @@ Artifact names (planned, none generated in this environment):
 
 ## Evidence and acceptance gaps
 
-Local Gradle invocation failed before build configuration: downloading Gradle 9.0.0 from services.gradle.org returned `Network is unreachable`. No cached compiler/distribution was available. No tests were executed. The Windows Actions workflow has not run: GitHub connector writes (branch/tree creation) returned HTTP 403 Resource not accessible by integration; git push had no credential. The cloud browser subsequently created remote branch feature/windows-desktop and committed three workflow files as 1cae0f111d33be8f5c90750eb427315774c2956b. The source JSON upload reached the staging page, but the browser then timed out for all interactions and even reset. Read-only git ls-remote confirms that the branch remains at the workflow-only commit: no source import and no PR have been completed. PR creation through the connector also returned HTTP 403. A PR-only workflow-runs query returned no runs; this does not establish the state of push-triggered runs.
+Source recovery was completed on 2026-10-03 using the cloud browser and the existing branch-only importer. Commit `97e6127644e08289c1d59057fee53d51fefd1da4` has the exact source tree of retained local commit `52a3cea2720dbd27b89afe4a3cdb58e6c1f9ae08`, including normal Git files under shared/desktopApp and binary icons. The temporary import JSON was removed automatically. Existing Android release/signing files were untouched.
 
-Written test cases cover six link formats, portable Base64, Windows filenames/traversal, encrypted credential persistence/backup passwords, real local HTTP bytes, persisted completion and rejecting mismatched sizes. Passing results cannot be claimed until execution.
+Evidence: [Windows Desktop run 37109857353](https://github.com/STARSHINE56/StarAssistant/actions/runs/37109857353) passed `:shared:test` (2 tests), `:desktopApp:test` (4 tests), `:desktopApp:compileKotlin`, and Android `:app:testDebugUnitTest`, `:app:lintDebug`, `:app:assembleDebug`. It failed only in installer packaging. CI fixes reuse preinstalled WiX 3 and enforce UTF-8 for JDK 17 jpackage arguments. Installer metadata uses ASCII description/menu group for WiX's English code page; the application UI remains Chinese. The latest branch run is the authority for installer build success and uploaded artifacts.
 
-Required further acceptance: Android three checks (and signed release if secrets available), shared/desktop tests and compilation, EXE/MSI packaging, install/start/uninstall/upgrade, live six-platform credentials and share/cloud/download operations, resume/cancel/retry including expiration, Mica/Windows 10 fallback, 1280×720/1366×768/1920×1080/2560×1440 and 125%/150% DPI visual checks. No screenshot or machine-level Windows evidence exists yet.
+Tests execute real local HTTP downloads, encrypted credential persistence/backup password rejection, completed-task persistence, mismatched-size failure, Windows filename handling, six link formats and portable Base64. They do not validate live authenticated platform accounts, UI layout or installation. Local Gradle download remains blocked by the sandbox network; the checks above ran on GitHub runners.
 
-Continuation checkpoint: source files remained intact. Direct create-file request for shared/build.gradle.kts returned HTTP 403. GitHub plugin is installed/enabled, but installation/account listing returned empty arrays. Browser documentation recovery also timed out. Remote branch was reconfirmed at 1cae0f111d33be8f5c90750eb427315774c2956b. Added desktop icon resources and central Kotlin JVM/Compose plugin declarations locally; ICO structure and git diff checks passed. Gradle download again failed before compilation. Existing remote workflows were not recreated.
+Required further acceptance: signed Android release if secrets available, installer artifact verification, install/start/uninstall/upgrade, live six-platform credentials and share/cloud/download operations, resume/cancel/retry including expiration, Mica/Windows 10 fallback, 1280×720/1366×768/1920×1080/2560×1440 and 125%/150% DPI visual checks. No screenshot or machine-level Windows evidence exists yet.
