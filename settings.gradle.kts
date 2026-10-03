@@ -29,4 +29,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "XingChenAssistant"
 
-include(":app")
+if (!providers.gradleProperty("desktopOnly").isPresent) include(":app")
+include(":shared", ":desktopApp")
