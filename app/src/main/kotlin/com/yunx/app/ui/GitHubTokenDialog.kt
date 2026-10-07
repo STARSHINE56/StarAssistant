@@ -94,7 +94,11 @@ internal fun GitHubTokenDialog(onDismiss: () -> Unit, onChanged: (Boolean) -> Un
                         scope.launch {
                             when (val check = githubApi.validateToken(input)) {
                                 is TokenCheck.Valid -> {
-                                    GitHubTokenStore.setToken(context, input)
+                                    val saved = runCatching { GitHubTokenStore.setToken(context, input) }
+                                    if (saved.isFailure) {
+                                        tokenError = "本机密钥暂时不可用，请解锁设备后重试"
+                                        return@launch
+                                    }
                                     onChanged(true)
                                     onDismiss()
                                     SnackbarController.show("GitHub Token 已保存（@${check.login}）")

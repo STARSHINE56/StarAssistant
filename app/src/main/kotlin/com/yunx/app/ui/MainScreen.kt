@@ -1047,6 +1047,7 @@ fun MainScreen() {
                         onSupportClick = { showSupport = true },
                         backupManager = backupManager,
                         onGopeedClick = { showGopeed = true },
+                        onConcurrencyChanged = { downloadManager.updateConcurrencyLimit() },
                         onDownloadUpdateApk = { url, name ->
                             scope.launch {
                                 downloadManager.enqueue(url = url, fileName = name)
