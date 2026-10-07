@@ -21,57 +21,42 @@ package com.yunx.app.ui.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import com.yunx.app.data.db.Pan123AccountEntity
-import com.yunx.app.data.repository.Pan123AccountRepository
-import kotlinx.coroutines.CancellationException
+import com.yunx.app.data.db.Pan115AccountEntity
+import com.yunx.app.data.repository.Pan115AccountRepository
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 /**
- * 123 云盘账号 ViewModel：两条登录路径（网页 authorToken / 原生账号密码）最终都落成同一份
- * JWT 凭证，这里只暴露登录态与两个入口，供主页/登录页/解析页共享。
+ * 115 网盘账号 ViewModel：暴露登录态，供主页与登录页共享。
  */
-class Pan123AccountViewModel(
-    private val repository: Pan123AccountRepository
+class Pan115AccountViewModel(
+    private val repository: Pan115AccountRepository
 ) : ViewModel() {
 
-    val pan123Account: StateFlow<Pan123AccountEntity?> = repository.observeAccount()
+    val pan115Account: StateFlow<Pan115AccountEntity?> = repository.observeAccount()
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5_000),
             initialValue = null
         )
 
-    /** 网页登录凭证（authorToken）校验并落库；返回是否保存成功（登录页「保存」与自动检测共用同一入口） */
-    suspend fun saveToken(token: String): Boolean = repository.saveToken(token)
+    /** 保存 115 登录 Cookie（UID/CID/SEID/KID 等）；返回是否保存成功 */
+    suspend fun saveCookie(cookie: String): Boolean = repository.saveCookie(cookie)
 
-    /**
-     * 账号密码登录（123 原生 sign_in 接口）。
-     * @return null = 登录成功；否则是可直接展示的错误文案
-     */
-    suspend fun login(account: String, password: String): String? =
-        try {
-            repository.loginWithPassword(account, password)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            // 登录接口自身已经把网络错误映射成文案了，这里是最后一道兜底（写库等非网络异常）
-            "登录失败，请稍后重试"
-        }
-
+    /** 退出登录：清除本地 Cookie 与 WebView 存储 */
     fun logout() {
         viewModelScope.launch { repository.logout() }
     }
 
     class Factory(
-        private val repository: Pan123AccountRepository
+        private val repository: Pan115AccountRepository
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            require(modelClass.isAssignableFrom(Pan123AccountViewModel::class.java))
-            return Pan123AccountViewModel(repository) as T
+            require(modelClass.isAssignableFrom(Pan115AccountViewModel::class.java))
+            return Pan115AccountViewModel(repository) as T
         }
     }
 }

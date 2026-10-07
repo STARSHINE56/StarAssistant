@@ -27,52 +27,46 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.yunx.app.data.download.DownloadManager
 import com.yunx.app.data.download.DownloadPlatform
-import com.yunx.app.data.network.Pan123Api
-import com.yunx.app.data.network.Pan123Constants
+import com.yunx.app.data.network.GuangYaApi
+import com.yunx.app.data.network.GuangYaConstants
 import com.yunx.app.data.network.model.DownloadLink
 import com.yunx.app.data.network.model.ShareExpire
 import com.yunx.app.data.network.model.ShareFile
 import com.yunx.app.data.network.model.ShareInfo
+import com.yunx.app.data.repository.GuangYaAccountRepository
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
-import java.text.SimpleDateFormat
-import java.util.Calendar
-import java.util.Date
-import java.util.Locale
-import java.util.TimeZone
 
-/** 123 云盘浏览 UI 状态 */
-sealed interface Pan123CloudUiState {
-    data object Loading : Pan123CloudUiState
+/** 光鸭云盘浏览 UI 状态（根目录 dirId = ""）。 */
+sealed interface GuangYaCloudUiState {
+    data object Loading : GuangYaCloudUiState
     data class Loaded(
         val files: List<ShareFile>,
         val pathNames: List<String>,
-        /** 当前目录 id（根="0"） */
         val dirId: String
-    ) : Pan123CloudUiState
-    data class Error(val message: String) : Pan123CloudUiState
+    ) : GuangYaCloudUiState
+    data class Error(val message: String) : GuangYaCloudUiState
 }
 
 /**
- * 123 云盘浏览 ViewModel（参考 139/百度云盘）：
- * - 目录浏览（根/子目录/面包屑回退）+ 下拉刷新
- * - 文件操作：下载 / 重命名 / 移动 / 创建分享 / 删除 + 长按多选批量
- * 认证走 Bearer token（Pan123AccountEntity.accessToken），目录用 fileId（根="0"）。
+ * 光鸭云盘浏览 ViewModel（镜像 123 云盘浏览）：
+ * 目录浏览 + 下拉刷新 + 下载/重命名/移动/创建分享/删除 + 长按多选批量。
+ * 认证走 access token（GuangYaAccountEntity.accessToken），目录用 fileId（根 = ""）。
  */
-class Pan123CloudViewModel(
-    private val api: Pan123Api,
-    private val tokenProvider: suspend () -> String?,
+class GuangYaCloudViewModel(
+    private val api: GuangYaApi,
+    private val accountRepository: GuangYaAccountRepository,
     private val downloadManager: DownloadManager,
     private val loginState: Flow<Boolean>
 ) : ViewModel() {
 
-    private val _uiState = MutableStateFlow<Pan123CloudUiState>(Pan123CloudUiState.Loading)
-    val uiState: StateFlow<Pan123CloudUiState> = _uiState.asStateFlow()
+    private val _uiState = MutableStateFlow<GuangYaCloudUiState>(GuangYaCloudUiState.Loading)
+    val uiState: StateFlow<GuangYaCloudUiState> = _uiState.asStateFlow()
 
     var actionFile by mutableStateOf<ShareFile?>(null)
         private set
@@ -94,19 +88,20 @@ class Pan123CloudViewModel(
     private val _selected = mutableStateListOf<ShareFile>()
     val selected: List<ShareFile> get() = _selected
 
+    var downloadLink by mutableStateOf<DownloadLink?>(null)
+        private set
+    private var pendingDownload: PendingDownload? = null
+
     private val dirStack = ArrayDeque<String>()
     private val nameStack = ArrayDeque<String>()
 
-    private val _moveUiState = MutableStateFlow<Pan123CloudUiState>(Pan123CloudUiState.Loading)
-    val moveUiState: StateFlow<Pan123CloudUiState> = _moveUiState.asStateFlow()
+    private val _moveUiState = MutableStateFlow<GuangYaCloudUiState>(GuangYaCloudUiState.Loading)
+    val moveUiState: StateFlow<GuangYaCloudUiState> = _moveUiState.asStateFlow()
     private val moveDirStack = ArrayDeque<String>()
     private val moveNameStack = ArrayDeque<String>()
 
     init {
         loadRoot()
-        // 启动期未登录时上面的 loadRoot 会残留「请先登录…」错误态；登录态从无到有后自动重载根目录，
-        // 进网盘列表无需再手动点「重试」。drop(1) 跳过 VM 创建时的登录态快照（init 已加载，避免冷启动重复），
-        // distinctUntilChanged 过滤登录后 Cookie/Token 刷新等重复 upsert。
         viewModelScope.launch {
             loginState
                 .drop(1)
@@ -116,14 +111,14 @@ class Pan123CloudViewModel(
     }
 
     private suspend fun token(): String =
-        tokenProvider() ?: throw IllegalStateException("请先登录123云盘")
+        accountRepository.ensureAccessToken() ?: throw IllegalStateException("请先登录光鸭云盘")
 
     // ---------- 目录浏览 ----------
 
     fun loadRoot() {
         dirStack.clear()
         nameStack.clear()
-        load("0", emptyList())
+        load(GuangYaConstants.ROOT_PARENT_ID, emptyList())
     }
 
     fun openFolder(file: ShareFile) {
@@ -139,7 +134,7 @@ class Pan123CloudViewModel(
         }
         dirStack.removeLast()
         nameStack.removeLast()
-        load(dirStack.lastOrNull() ?: "0", nameStack.toList())
+        load(dirStack.lastOrNull() ?: GuangYaConstants.ROOT_PARENT_ID, nameStack.toList())
     }
 
     fun navigateToLevel(level: Int) {
@@ -147,7 +142,7 @@ class Pan123CloudViewModel(
             dirStack.removeLast()
             nameStack.removeLast()
         }
-        load(dirStack.lastOrNull() ?: "0", nameStack.toList())
+        load(dirStack.lastOrNull() ?: GuangYaConstants.ROOT_PARENT_ID, nameStack.toList())
     }
 
     // ---------- 多选 ----------
@@ -195,7 +190,6 @@ class Pan123CloudViewModel(
         downloadTriggered = 0
     }
 
-    /** 中断当前下载（批量下载/文件夹下载） */
     fun cancelDownload() {
         downloadCancelRequested = true
     }
@@ -205,7 +199,7 @@ class Pan123CloudViewModel(
     fun openMoveRoot() {
         moveDirStack.clear()
         moveNameStack.clear()
-        moveLoad("0", emptyList())
+        moveLoad(GuangYaConstants.ROOT_PARENT_ID, emptyList())
     }
 
     fun openMoveFolder(file: ShareFile) {
@@ -218,7 +212,7 @@ class Pan123CloudViewModel(
         if (moveNameStack.isEmpty()) return
         moveDirStack.removeLast()
         moveNameStack.removeLast()
-        moveLoad(moveDirStack.lastOrNull() ?: "0", moveNameStack.toList())
+        moveLoad(moveDirStack.lastOrNull() ?: GuangYaConstants.ROOT_PARENT_ID, moveNameStack.toList())
     }
 
     fun moveNavigateToLevel(level: Int) {
@@ -226,46 +220,43 @@ class Pan123CloudViewModel(
             moveDirStack.removeLast()
             moveNameStack.removeLast()
         }
-        moveLoad(moveDirStack.lastOrNull() ?: "0", moveNameStack.toList())
+        moveLoad(moveDirStack.lastOrNull() ?: GuangYaConstants.ROOT_PARENT_ID, moveNameStack.toList())
     }
 
     private fun moveLoad(dirId: String, pathNames: List<String>) {
-        _moveUiState.value = Pan123CloudUiState.Loading
+        _moveUiState.value = GuangYaCloudUiState.Loading
         viewModelScope.launch {
             try {
-                val files = api.listCloudFiles(dirId, token()).filter { it.isdir }
-                _moveUiState.value = Pan123CloudUiState.Loaded(files, pathNames, dirId)
+                val files = api.listCloudFiles(token(), dirId).filter { it.isdir }
+                _moveUiState.value = GuangYaCloudUiState.Loaded(files, pathNames, dirId)
             } catch (e: Exception) {
-                _moveUiState.value = Pan123CloudUiState.Error(e.message ?: "加载失败")
+                _moveUiState.value = GuangYaCloudUiState.Error(e.message ?: "加载失败")
             }
         }
     }
 
     // ---------- 单文件操作 ----------
 
-    /** 123 下载直链的请求头（CDN 直链需带 Referer，文档 §5.3.1） */
     private fun downloadHeaders(): Map<String, String> = mapOf(
-        "User-Agent" to Pan123Constants.WEB_UA,
-        "Referer" to Pan123Constants.DOWNLOAD_REFERER
+        "User-Agent" to GuangYaConstants.WEB_UA,
+        "Referer" to GuangYaConstants.DOWNLOAD_REFERER
     )
 
-    /** 递归收集文件夹内所有文件（保持目录结构） */
     private suspend fun collectFolderFiles(
         dirId: String,
         prefix: String,
-        token: String,
+        tk: String,
         result: MutableList<Pair<ShareFile, String>>,
         depth: Int
     ) {
         if (depth > 12) return
-        val list = runCatching { api.listCloudFiles(dirId, token) }.getOrDefault(emptyList())
+        val list = runCatching { api.listCloudFiles(tk, dirId) }.getOrDefault(emptyList())
         list.filter { !it.isdir }.forEach { result.add(it to "$prefix/${it.fname}") }
         list.filter { it.isdir }.forEach {
-            collectFolderFiles(it.fid, "$prefix/${it.fname}", token, result, depth + 1)
+            collectFolderFiles(it.fid, "$prefix/${it.fname}", tk, result, depth + 1)
         }
     }
 
-    /** 下载整个文件夹（操作菜单）：递归收集所有文件，保持目录结构保存到 Download */
     fun downloadFolder() {
         val folder = actionFile ?: return
         if (!folder.isdir) return
@@ -284,19 +275,15 @@ class Pan123CloudViewModel(
                 }
                 var okCount = 0
                 tasks.forEachIndexed { index, (file, relPath) ->
-                    // 用户点击「中断」：跳过剩余项（已入队任务保留下载）
                     if (downloadCancelRequested) return@forEachIndexed
                     folderProgress = "正在加入下载 ${index + 1}/${tasks.size}"
                     runCatching {
-                        val link = api.getDownloadLink(file, tk) ?: return@runCatching
+                        val link = api.getDownloadLink(tk, file) ?: return@runCatching
                         downloadManager.enqueue(
                             url = link.downloadUrl,
                             fileName = relPath,
                             size = link.size,
-                            platform = DownloadPlatform.PAN123,
-                            sourceFileId = file.fid,
-                            sourceType = com.yunx.app.data.download.DownloadSourceType.CLOUD,
-                            sourceContext = file.fidToken,
+                            platform = DownloadPlatform.GUANGYA,
                             headers = downloadHeaders()
                         )
                         okCount++
@@ -319,32 +306,20 @@ class Pan123CloudViewModel(
         }
     }
 
-    /** 下载：getDownloadLink 取直链（CDN 直链，Referer 即可）→ 内置下载队列 */
-    /** 待确认的下载直链（单文件下载弹窗展示用，长按链接可复制） */
-    var downloadLink by mutableStateOf<DownloadLink?>(null)
-        private set
-
-    /** 与 downloadLink 配套的入队参数（弹窗确认后直接入队） */
-    private var pendingDownload: PendingDownload? = null
-
-    /** 下载文件：取直链 → 弹出下载确认弹窗（对齐解析页行为，确认后入队） */
     fun downloadFile() {
         val file = actionFile ?: return
         viewModelScope.launch {
             isOperating = true
             try {
-                val link = api.getDownloadLink(file, token())
+                val link = api.getDownloadLink(token(), file)
                     ?: throw IllegalStateException("获取下载链接失败")
                 pendingDownload = PendingDownload(
                     url = link.downloadUrl,
                     fileName = file.fname.ifBlank { link.filename },
                     size = link.size,
-                    headers = downloadHeaders(),
-                    sourceFileId = file.fid,
-                    sourceType = com.yunx.app.data.download.DownloadSourceType.CLOUD,
-                    sourceContext = file.fidToken
+                    headers = downloadHeaders()
                 )
-                downloadLink = link // 弹下载确认弹窗（长按直链可复制）
+                downloadLink = link
             } catch (e: Exception) {
                 cloudMessage = e.message ?: "下载失败"
             } finally {
@@ -353,7 +328,6 @@ class Pan123CloudViewModel(
         }
     }
 
-    /** 下载弹窗确认：用已生成的直链入队 */
     fun startDownload() {
         val pd = pendingDownload ?: return
         downloadLink = null
@@ -365,10 +339,7 @@ class Pan123CloudViewModel(
                     url = pd.url,
                     fileName = pd.fileName,
                     size = pd.size,
-                    platform = DownloadPlatform.PAN123,
-                    sourceFileId = pd.sourceFileId,
-                    sourceType = pd.sourceType,
-                    sourceContext = pd.sourceContext,
+                    platform = DownloadPlatform.GUANGYA,
                     headers = pd.headers
                 )
                 cloudMessage = "已加入下载：${pd.fileName}"
@@ -382,19 +353,17 @@ class Pan123CloudViewModel(
         }
     }
 
-    /** 关闭下载弹窗（放弃下载） */
     fun dismissDownloadDialog() {
         downloadLink = null
         pendingDownload = null
     }
 
-    /** 重命名 */
     fun renameFile(newName: String) {
         val file = actionFile ?: return
         viewModelScope.launch {
             isOperating = true
             try {
-                api.renameFile(file.fid, newName, token())
+                api.renameFile(token(), file.fid, newName)
                 cloudMessage = "已重命名"
                 actionFile = null
                 reloadCurrent()
@@ -406,15 +375,14 @@ class Pan123CloudViewModel(
         }
     }
 
-    /** 新建文件夹（当前目录下）；123 用文件 id，根目录 "0" */
     fun createFolder(name: String) {
         val newName = name.trim()
         if (newName.isEmpty()) return
-        val parentId = (uiState.value as? Pan123CloudUiState.Loaded)?.dirId ?: "0"
+        val parentId = (uiState.value as? GuangYaCloudUiState.Loaded)?.dirId ?: GuangYaConstants.ROOT_PARENT_ID
         viewModelScope.launch {
             isOperating = true
             try {
-                api.createDir(parentId, newName, token())
+                api.createDir(token(), parentId, newName)
                 cloudMessage = "已创建文件夹「$newName」"
                 reloadCurrent()
             } catch (e: Exception) {
@@ -425,13 +393,12 @@ class Pan123CloudViewModel(
         }
     }
 
-    /** 移动 */
     fun moveFile(toDirId: String) {
         val file = actionFile ?: return
         viewModelScope.launch {
             isOperating = true
             try {
-                api.moveFiles(listOf(file.fid), toDirId, token())
+                api.moveFiles(token(), listOf(file.fid), toDirId)
                 cloudMessage = "已移动到目标目录"
                 actionFile = null
                 reloadCurrent()
@@ -443,23 +410,18 @@ class Pan123CloudViewModel(
         }
     }
 
-    /**
-     * 创建分享（有效期选择，可带提取码）。
-     *
-     * @param expiredType UI 中性码（[ShareExpire]），**必须转成天数**再算 ISO 过期时间：
-     *   直接把中性码当天数会让「永久」变成 now+1 天、「7 天」变成 now+3 天（Agent.md §3.20）。
-     */
+    /** 创建分享（expiredType 为 [ShareExpire] 中性码，内部转天数）。 */
     fun shareFile(expiredType: Int, sharePwd: String?) {
         val file = actionFile ?: return
         viewModelScope.launch {
             isOperating = true
             try {
                 val info = api.createShare(
+                    accessToken = token(),
                     fileIds = listOf(file.fid),
-                    shareName = file.fname,
-                    expiration = expiration(ShareExpire.daysOrNull(expiredType)),
-                    sharePwd = sharePwd,
-                    token = token()
+                    title = file.fname,
+                    expireDays = ShareExpire.daysOrNull(expiredType),
+                    passcode = sharePwd
                 )
                 shareResult = info.copy(expiredType = expiredType)
             } catch (e: Exception) {
@@ -470,13 +432,12 @@ class Pan123CloudViewModel(
         }
     }
 
-    /** 删除（移入回收站） */
     fun deleteFile() {
         val file = actionFile ?: return
         viewModelScope.launch {
             isOperating = true
             try {
-                api.deleteFiles(listOf(file), token())
+                api.deleteFiles(token(), listOf(file.fid))
                 cloudMessage = "已删除「${file.fname}」"
                 actionFile = null
                 reloadCurrent()
@@ -490,7 +451,6 @@ class Pan123CloudViewModel(
 
     // ---------- 批量操作 ----------
 
-    /** 批量下载（不切页；选中文件夹时递归下载整个文件夹并保持目录结构） */
     fun downloadSelected() {
         val files = _selected.toList()
         if (files.isEmpty()) return
@@ -515,19 +475,15 @@ class Pan123CloudViewModel(
                 }
                 var okCount = 0
                 tasks.forEachIndexed { index, (file, relPath) ->
-                    // 用户点击「中断」：跳过剩余项（已入队任务保留下载）
                     if (downloadCancelRequested) return@forEachIndexed
                     folderProgress = "正在加入下载 ${index + 1}/${tasks.size}"
                     runCatching {
-                        val link = api.getDownloadLink(file, tk) ?: return@runCatching
+                        val link = api.getDownloadLink(tk, file) ?: return@runCatching
                         downloadManager.enqueue(
                             url = link.downloadUrl,
                             fileName = if (relPath.contains('/')) relPath else file.fname.ifBlank { link.filename },
                             size = link.size,
-                            platform = DownloadPlatform.PAN123,
-                            sourceFileId = file.fid,
-                            sourceType = com.yunx.app.data.download.DownloadSourceType.CLOUD,
-                            sourceContext = file.fidToken,
+                            platform = DownloadPlatform.GUANGYA,
                             headers = downloadHeaders()
                         )
                         okCount++
@@ -550,7 +506,6 @@ class Pan123CloudViewModel(
         }
     }
 
-    /** 批量分享（@param expiredType UI 中性码，转换见 [shareFile]） */
     fun shareSelected(expiredType: Int, sharePwd: String?) {
         val files = _selected.toList()
         if (files.isEmpty()) return
@@ -559,11 +514,11 @@ class Pan123CloudViewModel(
             try {
                 val title = if (files.size == 1) files[0].fname else "分享 ${files.size} 个文件"
                 val info = api.createShare(
+                    accessToken = token(),
                     fileIds = files.map { it.fid },
-                    shareName = title,
-                    expiration = expiration(ShareExpire.daysOrNull(expiredType)),
-                    sharePwd = sharePwd,
-                    token = token()
+                    title = title,
+                    expireDays = ShareExpire.daysOrNull(expiredType),
+                    passcode = sharePwd
                 )
                 shareResult = info.copy(expiredType = expiredType)
                 exitMultiSelect()
@@ -575,14 +530,13 @@ class Pan123CloudViewModel(
         }
     }
 
-    /** 批量移动 */
     fun moveSelected(toDirId: String) {
         val files = _selected.toList()
         if (files.isEmpty()) return
         viewModelScope.launch {
             isOperating = true
             try {
-                api.moveFiles(files.map { it.fid }, toDirId, token())
+                api.moveFiles(token(), files.map { it.fid }, toDirId)
                 cloudMessage = "已移动 ${files.size} 项"
                 exitMultiSelect()
                 reloadCurrent()
@@ -594,14 +548,13 @@ class Pan123CloudViewModel(
         }
     }
 
-    /** 批量删除 */
     fun deleteSelected() {
         val files = _selected.toList()
         if (files.isEmpty()) return
         viewModelScope.launch {
             isOperating = true
             try {
-                api.deleteFiles(files, token())
+                api.deleteFiles(token(), files.map { it.fid })
                 cloudMessage = "已删除 ${files.size} 项"
                 exitMultiSelect()
                 reloadCurrent()
@@ -615,18 +568,17 @@ class Pan123CloudViewModel(
 
     // ---------- 内部 ----------
 
-    /** 下拉刷新 */
     fun refresh() {
         val current = uiState.value
-        if (current !is Pan123CloudUiState.Loaded) {
+        if (current !is GuangYaCloudUiState.Loaded) {
             loadRoot()
             return
         }
         refreshing = true
         viewModelScope.launch {
             try {
-                val files = api.listCloudFiles(current.dirId, token())
-                _uiState.value = Pan123CloudUiState.Loaded(files, current.pathNames, current.dirId)
+                val files = api.listCloudFiles(token(), current.dirId)
+                _uiState.value = GuangYaCloudUiState.Loaded(files, current.pathNames, current.dirId)
             } catch (e: Exception) {
                 cloudMessage = e.message ?: "刷新失败"
             } finally {
@@ -637,7 +589,7 @@ class Pan123CloudViewModel(
 
     private fun reloadCurrent() {
         val current = uiState.value
-        if (current is Pan123CloudUiState.Loaded) {
+        if (current is GuangYaCloudUiState.Loaded) {
             load(current.dirId, current.pathNames)
         } else {
             loadRoot()
@@ -645,38 +597,25 @@ class Pan123CloudViewModel(
     }
 
     private fun load(dirId: String, pathNames: List<String>) {
-        _uiState.value = Pan123CloudUiState.Loading
+        _uiState.value = GuangYaCloudUiState.Loading
         viewModelScope.launch {
             try {
-                val files = api.listCloudFiles(dirId, token())
-                _uiState.value = Pan123CloudUiState.Loaded(files, pathNames, dirId)
+                val files = api.listCloudFiles(token(), dirId)
+                _uiState.value = GuangYaCloudUiState.Loaded(files, pathNames, dirId)
             } catch (e: Exception) {
-                _uiState.value = Pan123CloudUiState.Error(e.message ?: "加载失败")
+                _uiState.value = GuangYaCloudUiState.Error(e.message ?: "加载失败")
             }
         }
     }
 
-    /** 分享有效期**天数** → ISO 过期时间（null=永久固定 2099，其他 = now + days，+08:00 格式，文档 §5.10） */
-    private fun expiration(days: Int?): String {
-        if (days == null) return Pan123Constants.EXPIRATION_FOREVER
-        val cal = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, days) }
-        val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US)
-        // 手动拼时区偏移（+08:00），避免 SimpleDateFormat "XXX" 在低版本 Android 不兼容
-        val offsetMin = TimeZone.getDefault().getOffset(cal.timeInMillis) / 60000
-        val sign = if (offsetMin >= 0) "+" else "-"
-        val abs = kotlin.math.abs(offsetMin)
-        return sdf.format(Date(cal.timeInMillis)) +
-            String.format("%s%02d:%02d", sign, abs / 60, abs % 60)
-    }
-
     class Factory(
-        private val api: Pan123Api,
-        private val tokenProvider: suspend () -> String?,
+        private val api: GuangYaApi,
+        private val accountRepository: GuangYaAccountRepository,
         private val downloadManager: DownloadManager,
         private val loginState: Flow<Boolean>
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
-            Pan123CloudViewModel(api, tokenProvider, downloadManager, loginState) as T
+            GuangYaCloudViewModel(api, accountRepository, downloadManager, loginState) as T
     }
 }

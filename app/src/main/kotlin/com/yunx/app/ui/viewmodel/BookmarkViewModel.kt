@@ -24,6 +24,14 @@ class BookmarkViewModel(private val dao: BookmarkDao) : ViewModel() {
             initialValue = emptyList()
         )
 
+    /** 已添加到主页快捷方式的收藏（主页下方网格） */
+    val homeBookmarks: StateFlow<List<BookmarkEntity>> = dao.observeHomePinned()
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = emptyList()
+        )
+
     /** 分类列表：预置分类 + 数据库中已出现的自定义分类（去重，保持预置在前） */
     val categories: StateFlow<List<String>> = dao.observeCategories()
         .map { db -> (BookmarkEntity.PRESET_CATEGORIES + db).distinct() }
@@ -71,6 +79,22 @@ class BookmarkViewModel(private val dao: BookmarkDao) : ViewModel() {
         viewModelScope.launch {
             dao.delete(id)
             SnackbarController.show("已删除")
+        }
+    }
+
+    /** 添加 / 移除主页快捷方式 */
+    fun setHomePinned(id: Long, pinned: Boolean) {
+        viewModelScope.launch {
+            dao.updateHomePinned(id, pinned)
+            SnackbarController.show(if (pinned) "已添加到主页" else "已从主页移除")
+        }
+    }
+
+    /** 自定义主页快捷方式色块文字（空串 = 自动取标题前几个字） */
+    fun setHomeLabel(id: Long, label: String) {
+        viewModelScope.launch {
+            dao.updateHomeLabel(id, label.trim())
+            SnackbarController.show(if (label.isBlank()) "已恢复自动文字" else "已更新快捷方式文字")
         }
     }
 
