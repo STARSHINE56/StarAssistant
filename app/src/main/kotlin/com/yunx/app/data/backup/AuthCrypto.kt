@@ -1,6 +1,8 @@
 package com.yunx.app.data.backup
 
-import android.util.Base64
+import okio.ByteString.Companion.toByteString
+import okio.ByteString.Companion.decodeBase64
+import javax.crypto.spec.SecretKeySpec
 import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.SecretKey
@@ -42,12 +44,12 @@ object AuthCrypto {
         System.arraycopy(salt, 0, payload, magic.size, salt.size)
         System.arraycopy(iv, 0, payload, magic.size + salt.size, iv.size)
         System.arraycopy(ciphertext, 0, payload, magic.size + salt.size + iv.size, ciphertext.size)
-        return Base64.encodeToString(payload, Base64.NO_WRAP)
+        return payload.toByteString().base64()
     }
 
     /** 解密 Base64 密文；密码错误/文件损坏抛异常 */
     fun decrypt(data: String, password: String): String {
-        val payload = Base64.decode(data.trim(), Base64.NO_WRAP)
+        val payload = data.trim().decodeBase64()?.toByteArray() ?: throw IllegalArgumentException("备份 Base64 无效")
         val magicV1 = MAGIC_V1.toByteArray(Charsets.UTF_8)
         val magicV2 = MAGIC_V2.toByteArray(Charsets.UTF_8)
         val (magic, iterations) = when {
@@ -69,7 +71,7 @@ object AuthCrypto {
 
     /** 判断内容是否为加密备份（检查魔数头部） */
     fun isEncrypted(data: String): Boolean = runCatching {
-        val payload = Base64.decode(data.trim(), Base64.NO_WRAP)
+        val payload = data.trim().decodeBase64()?.toByteArray() ?: throw IllegalArgumentException("备份 Base64 无效")
         val magicV1 = MAGIC_V1.toByteArray(Charsets.UTF_8)
         val magicV2 = MAGIC_V2.toByteArray(Charsets.UTF_8)
         (payload.size >= magicV1.size && payload.copyOfRange(0, magicV1.size).contentEquals(magicV1)) ||
@@ -79,7 +81,7 @@ object AuthCrypto {
     private fun deriveKey(password: String, salt: ByteArray, iterations: Int): SecretKey {
         val spec = PBEKeySpec(password.toCharArray(), salt, iterations, KEY_LENGTH)
         return try {
-            SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec)
+            SecretKeySpec(SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded, "AES")
         } finally {
             spec.clearPassword()
         }
