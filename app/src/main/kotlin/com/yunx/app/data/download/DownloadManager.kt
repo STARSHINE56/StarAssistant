@@ -214,7 +214,7 @@ class DownloadManager(
      * 拉起前台服务 + WakeLock，**移除时**才允许释放。用集合的 add/remove 返回值去重，
      * 保证无论从哪条路径终结（完成 / 失败 / 用户暂停 / 用户删除 / 引擎侧自己变 pause）都只扣一次。
      */
-    private val engineKeepAliveIds = ConcurrentHashMap.newKeySet<Long>()
+    private val engineKeepAliveIds = java.util.Collections.newSetFromMap(ConcurrentHashMap<Long, Boolean>())
 
     /** 引擎任务进度同步协程（同一时刻只跑一个；没有可同步任务时自己退出） */
     private var engineSyncJob: Job? = null

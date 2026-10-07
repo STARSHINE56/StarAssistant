@@ -82,7 +82,8 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
     private fun newCallSet(): MutableSet<Call> =
         Collections.newSetFromMap(ConcurrentHashMap<Call, Boolean>())
     fun cancelCalls(taskId: Long) {
-        activeCalls.remove(taskId)?.forEach { call -> runCatching { call.cancel() } }
+        val calls = synchronized(activeCalls) { activeCalls.remove(taskId)?.toList() }
+        calls?.forEach { call -> runCatching { call.cancel() } }
     }
 
     // ---------- 总大小探测 ----------
@@ -212,8 +213,9 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
             .get().build()
 
         val call = client.newCall(request)
-        val callSet = activeCalls.getOrPut(taskId) { newCallSet() }
-        callSet.add(call)
+        val callSet = synchronized(activeCalls) {
+            activeCalls.getOrPut(taskId) { newCallSet() }.also { it.add(call) }
+        }
         val cancelHandle = coroutineContext[Job]?.invokeOnCompletion { call.cancel() }
         try {
             return call.execute().use { response ->
@@ -261,8 +263,10 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
             }
         } finally {
             // ★ 只摘除当前 Call；集合空了才移除映射，避免任务完成后留下空集合常驻（原实现只在 pause/remove 时清理）
-            callSet.remove(call)
-            activeCalls.computeIfPresent(taskId) { _, set -> if (set.isEmpty()) null else set }
+            synchronized(activeCalls) {
+                callSet.remove(call)
+                if (callSet.isEmpty() && activeCalls[taskId] === callSet) activeCalls.remove(taskId)
+            }
             cancelHandle?.dispose()
         }
     }
@@ -317,8 +321,9 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
             .apply { headers.forEach { (k, v) -> header(k, v) } }
             .get().build()
         val call = client.newCall(request)
-        val callSet = activeCalls.getOrPut(taskId) { newCallSet() }
-        callSet.add(call)
+        val callSet = synchronized(activeCalls) {
+            activeCalls.getOrPut(taskId) { newCallSet() }.also { it.add(call) }
+        }
         val cancelHandle = coroutineContext[Job]?.invokeOnCompletion { call.cancel() }
         try {
             call.execute().use { response ->
@@ -372,8 +377,10 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
             false
         } finally {
             // ★ 只摘除当前 Call；集合空了才移除映射，避免任务完成后留下空集合常驻（原实现只在 pause/remove 时清理）
-            callSet.remove(call)
-            activeCalls.computeIfPresent(taskId) { _, set -> if (set.isEmpty()) null else set }
+            synchronized(activeCalls) {
+                callSet.remove(call)
+                if (callSet.isEmpty() && activeCalls[taskId] === callSet) activeCalls.remove(taskId)
+            }
             cancelHandle?.dispose()
         }
     }
