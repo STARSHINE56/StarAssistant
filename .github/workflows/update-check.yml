@@ -3,6 +3,9 @@ name: Apply Update Check Fix
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -20,4 +23,4 @@ jobs:
           git config user.email "starshine9@users.noreply.github.com"
           git add -A
           git diff --staged --quiet || git commit -m "fix: replace website entry with manual update check"
-          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/STARSHINE56/StarAssistant.git main
+          git push origin main
