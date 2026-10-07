@@ -473,7 +473,7 @@ object GopeedEngine {
      *
      * ★ 调小时不打断已经在跑的任务：它们继续跑完，只是不再补位（引擎的 PutConfig 不做重新平衡）。
      */
-    fun applyMaxRunning(context: Context): Int? {
+    fun applyMaxRunning(context: Context, allowedToResume: (String) -> Boolean = { false }): Int? {
         if (_state.value != State.RUNNING) return null
         val value = maxRunningOf(context)
         val cfg = invoke("GET", "/api/v1/config").optJSONObject("data")
@@ -489,7 +489,7 @@ object GopeedEngine {
             val t = tasks?.optJSONObject(i) ?: continue
             when (t.optString("status")) {
                 "running" -> running++
-                "wait" -> t.optString("id").takeIf { it.isNotBlank() }?.let { waiting.add(it) }
+                "wait" -> t.optString("id").takeIf { it.isNotBlank() && allowedToResume(it) }?.let { waiting.add(it) }
             }
         }
         var free = value - running
