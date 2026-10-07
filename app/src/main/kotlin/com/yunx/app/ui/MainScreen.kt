@@ -1048,6 +1048,28 @@ fun MainScreen() {
                         backupManager = backupManager,
                         onGopeedClick = { showGopeed = true },
                         onConcurrencyChanged = { downloadManager.updateConcurrencyLimit() },
+                        onCheckUpdate = {
+                            SnackbarController.show("正在检查更新…")
+                            scope.launch {
+                                val result = UpdateChecker.fetchLatestRelease(
+                                    includePrerelease = com.yunx.app.ui.theme.ThemeController.acceptPrereleaseUpdate
+                                )
+                                when (result) {
+                                    is UpdateChecker.CheckResult.Success -> {
+                                        val current = UpdateChecker.currentVersion(context)
+                                        if (UpdateChecker.compareVersions(result.release.tagName, current) > 0) {
+                                            pendingRelease = result.release
+                                            showUpdateDialog = true
+                                        } else {
+                                            SnackbarController.show("当前已是最新版本 v$current")
+                                        }
+                                    }
+                                    is UpdateChecker.CheckResult.Failure -> {
+                                        SnackbarController.show("检查更新失败：${result.reason}")
+                                    }
+                                }
+                            }
+                        },
                         onDownloadUpdateApk = { url, name ->
                             scope.launch {
                                 downloadManager.enqueue(url = url, fileName = name)

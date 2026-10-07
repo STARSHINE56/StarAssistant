@@ -115,6 +115,7 @@ fun SettingsScreen(
     backupManager: AuthBackupManager,
     onGopeedClick: () -> Unit = {},
     onConcurrencyChanged: () -> Unit = {},
+    onCheckUpdate: () -> Unit = {},
     // 保留此参数以兼容 MainScreen 中现有的调用。
     onDownloadUpdateApk: (url: String, fileName: String) -> Unit,
     modifier: Modifier = Modifier
@@ -514,15 +515,9 @@ fun SettingsScreen(
 
         SettingsItem(
             icon = Icons.Outlined.SystemUpdate,
-            title = "软件官网",
-            description = "访问软件官方网站",
-            onClick = {
-                val intent = Intent(
-                    Intent.ACTION_VIEW,
-                    Uri.parse("https://link3.cc/starshine9")
-                )
-                context.startActivity(intent)
-            }
+            title = "检查更新",
+            description = "检查是否有新版本",
+            onClick = onCheckUpdate
         )
 
         Spacer(modifier = Modifier.height(6.dp))
