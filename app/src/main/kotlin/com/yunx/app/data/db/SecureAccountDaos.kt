@@ -302,7 +302,8 @@ internal object SecureAccountDaos {
                     CredentialStore.markKeyLost()
                 }
                 // 暂时不可用：原样返回 null，不动数据
-            } else {
+            } else if (error is javax.crypto.AEADBadTagException || error is IllegalArgumentException) {
+                // Proven corrupt envelope; unknown service failures retain recoverable credentials.
                 runCatching { clear() }
             }
             null
