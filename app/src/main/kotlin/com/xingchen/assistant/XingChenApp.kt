@@ -14,6 +14,8 @@ class XingChenApp : Application() {
         val engine = com.yunx.app.data.gopeed.GopeedEngine
         engine.syncInstalledState(this)
         val settings = com.yunx.app.data.prefs.SettingsRepository(this)
+        com.yunx.app.data.network.HttpClients.setProxy(
+            settings.proxyHost.takeIf { settings.proxyEnabled && it.isNotBlank() }, settings.proxyPort)
         if (settings.downloadEngine == com.yunx.app.data.prefs.SettingsRepository.ENGINE_GOPEED && engine.isInstalled(this)) {
             Thread { runCatching { engine.start(this, engine.resolveDownloadDir(this)) } }.start()
         }
