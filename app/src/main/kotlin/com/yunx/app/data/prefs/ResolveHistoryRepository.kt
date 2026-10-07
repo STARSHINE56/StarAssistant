@@ -71,6 +71,9 @@ class ResolveHistoryRepository(
         password: String?
     ): List<ResolveHistoryItem> {
         val parsed = ShareLinkParser.parse(text)
+            ?: com.yunx.app.data.network.GitHubLinkParser.parse(text)?.let {
+                com.yunx.app.data.network.ParsedShare(text.trim(), null, SharePlatform.GITHUB)
+            }
             ?: return load()
 
         val url = URL_REGEX
