@@ -26,3 +26,8 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+# Gopeed gomobile JNI class names are part of the native ABI.
+-keep class go.** { *; }
+-keep class com.gopeed.** { *; }
+-keep class com.mikepenz.** { *; }
+-dontwarn com.mikepenz.**

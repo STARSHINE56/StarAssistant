@@ -11,7 +11,7 @@ class SettingsRepository(context: Context) {
     private val prefs = context.applicationContext
         .getSharedPreferences("yunx_settings", Context.MODE_PRIVATE)
 
-    /** 下载线程数（通用/手动添加，分片并发数），默认 32，上限 512 */
+    /** 下载线程数（通用/手动添加，分片并发数），默认 32，上限 512（真实并发另见 [MAX_DOWNLOAD_THREADS] 的说明） */
     var downloadThreads: Int
         get() = downloadThreadsFor(DownloadPlatform.GENERIC)
         set(value) = setDownloadThreads(DownloadPlatform.GENERIC, value)
@@ -23,7 +23,7 @@ class SettingsRepository(context: Context) {
             .coerceIn(1, MAX_DOWNLOAD_THREADS)
     }
 
-    /** 设置指定平台的下载线程数；迅雷不可修改 */
+    /** 设置指定平台的下载线程数；迅雷不可修改（上限见 [MAX_DOWNLOAD_THREADS]） */
     fun setDownloadThreads(platform: String, value: Int) {
         if (platform == DownloadPlatform.XUNLEI) return
         prefs.edit().putInt(prefsKey(platform), value.coerceIn(1, MAX_DOWNLOAD_THREADS)).apply()
@@ -40,7 +40,26 @@ class SettingsRepository(context: Context) {
             prefs.edit().putString("download_dir_uri", value).apply()
         }
 
-    /** 最大同时下载任务数（默认 1：前台任务吃满带宽，其余排队；参考 IDM 默认单任务满速） */
+    /**
+     * Gopeed 引擎的下载目录（**真实文件系统路径**，如 `/storage/emulated/0/Download/YunX`）；
+     * 空 = 默认目录（公共 `Download` 根目录，与内置下载器同一口径，见 `StorageDirs`）。
+     *
+     * 为什么不复用 [downloadDirUri]：引擎是原生核心，写不了 SAF 的 `content://` 目录，只能拿真实路径。
+     * 用户在设置里选目录时走 SAF（从 tree Uri 反解真实路径），反解不到才让他手输，见 Agent.md §3.33。
+     */
+    var engineDownloadDir: String
+        get() = prefs.getString("engine_download_dir", "") ?: ""
+        set(value) {
+            prefs.edit().putString("engine_download_dir", value.trim()).apply()
+        }
+
+    /**
+     * 最大同时下载任务数（默认 3，超出的任务排队等待）。
+     *
+     * ★ 这一个值**同时**管两条下载路径，改默认值时两边一起走：
+     *   ① 内置分片下载器：`DownloadManager` 的并发闸门按它轮询等空位；
+     *   ② Gopeed 引擎：引擎自己的调度器按配置顶层的 `maxRunning` 排队（见 `GopeedEngine`）。
+     */
     var maxConcurrentDownloads: Int
         get() = prefs.getInt("max_concurrent_downloads", DEFAULT_MAX_CONCURRENT_DOWNLOADS)
         set(value) {
@@ -82,12 +101,71 @@ class SettingsRepository(context: Context) {
             prefs.edit().putBoolean("notification_show_speed", value).apply()
         }
 
+    /**
+     * 下载引擎：`ENGINE_BUILTIN`（默认，项目自带的 Kotlin 分片下载器）
+     * 或 `ENGINE_GOPEED`（内置 Gopeed 引擎，需先在「下载引擎」页导入 AAR）。
+     *
+     * 取值非法（手改 prefs 等）时按内置下载器处理；引擎没就绪时 DownloadManager 也会自动回退，
+     * 不会因为设置项把下载功能弄坏。
+     */
+    var downloadEngine: String
+        get() = prefs.getString("download_engine", ENGINE_BUILTIN)?.takeIf {
+            it == ENGINE_BUILTIN || it == ENGINE_GOPEED
+        } ?: ENGINE_BUILTIN
+        set(value) {
+            prefs.edit().putString("download_engine", value).apply()
+        }
+
+    /** 夸克取链方式：true=免转存（直接换下载直链，不写入网盘，默认）；false=先转存到临时目录再取链 */
+    var quarkNoSaveDownload: Boolean
+        get() = prefs.getBoolean("quark_no_save_download", true)
+        set(value) {
+            prefs.edit().putBoolean("quark_no_save_download", value).apply()
+        }
+
     /** 桌面图标样式：0=经典图标(icon)，1=新图标(icon2)；切换经 activity-alias 动态生效 */
     var appIconVariant: Int
         get() = prefs.getInt("app_icon_variant", 0)
         set(value) {
             prefs.edit().putInt("app_icon_variant", value.coerceIn(0, 1)).apply()
         }
+
+    /** 文件名显示方式：false=单行跑马灯滚动（默认，保持原有观感），true=多行折行显示 */
+    var fileNameMultiLine: Boolean
+        get() = prefs.getBoolean("file_name_multi_line", false)
+        set(value) {
+            prefs.edit().putBoolean("file_name_multi_line", value).apply()
+        }
+
+    /** 自动识别剪贴板分享链接：关闭后完全不读取剪贴板（默认开启） */
+    var clipboardSuggestEnabled: Boolean
+        get() = prefs.getBoolean("clipboard_suggest_enabled", true)
+        set(value) {
+            prefs.edit().putBoolean("clipboard_suggest_enabled", value).apply()
+        }
+
+    /** 接受预发布版更新：检查更新时把 GitHub Pre-release 也算作新版本（默认关闭） */
+    var acceptPrereleaseUpdate: Boolean
+        get() = prefs.getBoolean("accept_prerelease_update", false)
+        set(value) {
+            prefs.edit().putBoolean("accept_prerelease_update", value).apply()
+        }
+
+    /**
+     * 诊断模式（设置 → 关于云析 → 长按 → 开发调试）：默认关，开启后把 db / crypto / download /
+     * webview / network / operation 六个模块的详细日志写进私有目录（见 `DiagnosticLog`）。
+     * ★ 这里只存开关值，运行态由 `DiagnosticLog` 自己缓存（改完立刻生效，不必重启）。
+     */
+    var diagnosticMode: Boolean
+        get() = prefs.getBoolean("diagnostic_mode", false)
+        set(value) {
+            prefs.edit().putBoolean("diagnostic_mode", value).apply()
+        }
+
+    /** StarAssistant's own announcement API base; empty means announcements are disabled. */
+    var announcementBaseUrl: String
+        get() = prefs.getString("announcement_base_url", "").orEmpty()
+        set(value) { prefs.edit().putString("announcement_base_url", com.yunx.app.data.announcement.AnnouncementSource.normalize(value)).apply() }
 
     /** 忽略 SSL 证书校验（抓包调试用，隐藏菜单开启；默认关闭） */
     var ignoreSslCert: Boolean
@@ -124,12 +202,58 @@ class SettingsRepository(context: Context) {
             prefs.edit().putLong("theme_seed_color", value).apply()
         }
 
+    /**
+     * 自定义 GitHub 下载镜像前缀（如 "https://gh.dpik.top/"）。
+     * null/空字符串表示使用内置默认镜像（UpdateChecker.MIRROR_PREFIX）。
+     */
+    var githubMirrorPrefix: String?
+        get() = prefs.getString("github_mirror_prefix", null)
+        set(value) {
+            prefs.edit().putString("github_mirror_prefix", value).apply()
+        }
+
+    /** 是否启用 HTTP 代理（默认关闭，直连） */
+    var proxyEnabled: Boolean
+        get() = prefs.getBoolean("proxy_enabled", false)
+        set(value) {
+            prefs.edit().putBoolean("proxy_enabled", value).apply()
+        }
+
+    /** 代理主机地址（如 "127.0.0.1"），空串表示未配置 */
+    var proxyHost: String
+        get() = prefs.getString("proxy_host", "") ?: ""
+        set(value) {
+            prefs.edit().putString("proxy_host", value).apply()
+        }
+
+    /** 代理端口（默认 7890，范围 1-65535） */
+    var proxyPort: Int
+        get() = prefs.getInt("proxy_port", DEFAULT_PROXY_PORT)
+        set(value) {
+            prefs.edit().putInt("proxy_port", value.coerceIn(1, 65535)).apply()
+        }
+
     companion object {
         const val DEFAULT_DOWNLOAD_THREADS = 32
+
+        /** 下载引擎标识（[downloadEngine] 的取值）：内置 Kotlin 分片下载器 */
+        const val ENGINE_BUILTIN = "builtin"
+
+        /** 下载引擎标识：内置 Gopeed 引擎（gomobile 核心，需用户导入 AAR） */
+        const val ENGINE_GOPEED = "gopeed"
+        /**
+         * 线程数上限 = 512（与设置页档位一致）。
+         * 真正同时在飞的请求数另由 `DownloadManager.MAX_INFLIGHT_CHUNKS`（按最大堆预算推导、同样封顶 512）
+         * 与全进程 `inflightLimiter` 钉住：下载客户端已固定 HTTP/1.1，每路只占一条连接 + 64KB 读缓冲
+         * （256MB 堆 → 512 × 64KB = 32MB = 堆的 1/8，本机 FD 软限 32768），
+         * 所以这里放开到 512 不会再像 HTTP/2 时代那样把堆撑满（见 Agent.md §5.1.1）。
+         * 旧版本存过 128/256/512 的用户现在能真正用上这些档位。
+         */
         const val MAX_DOWNLOAD_THREADS = 512
         const val XUNLEI_DOWNLOAD_THREADS = 8
-        const val DEFAULT_MAX_CONCURRENT_DOWNLOADS = 1
+        const val DEFAULT_MAX_CONCURRENT_DOWNLOADS = 3
         const val DEFAULT_DOWNLOAD_RETRY_COUNT = 3
+        const val DEFAULT_PROXY_PORT = 7890
 
         /** 默认主题种子色：Material Blue（与内置默认方案一致） */
         const val DEFAULT_SEED_COLOR = 0xFF415F91L

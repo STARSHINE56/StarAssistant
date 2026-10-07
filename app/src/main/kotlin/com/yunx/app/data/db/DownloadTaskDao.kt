@@ -67,4 +67,19 @@ interface DownloadTaskDao {
 
     @Query("DELETE FROM download_task WHERE id = :id")
     suspend fun delete(id: Long)
+
+    /** 记下这条任务对应的 Gopeed 引擎任务 ID（走引擎下载时才写） */
+    @Query("UPDATE download_task SET engineTaskId = :engineTaskId WHERE id = :id")
+    suspend fun updateEngineTaskId(id: Long, engineTaskId: String)
+
+    /** 磁力任务完成时把占位显示名换成真正的种子名（种子名要等引擎解析出元数据才有） */
+    @Query("UPDATE download_task SET fileName = :name WHERE id = :id")
+    suspend fun updateFileName(id: Long, name: String)
+
+    /** 还在引擎里跑、需要同步进度的任务（已完成/失败的不再同步） */
+    @Query(
+        "SELECT * FROM download_task WHERE engineTaskId != '' " +
+            "AND status != 3 AND status != 4"
+    )
+    suspend fun listSyncableEngineTasks(): List<DownloadTaskEntity>
 }

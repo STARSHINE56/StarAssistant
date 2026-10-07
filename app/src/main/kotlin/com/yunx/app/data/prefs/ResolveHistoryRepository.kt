@@ -71,6 +71,9 @@ class ResolveHistoryRepository(
         password: String?
     ): List<ResolveHistoryItem> {
         val parsed = ShareLinkParser.parse(text)
+            ?: com.yunx.app.data.network.GitHubLinkParser.parse(text)?.let {
+                com.yunx.app.data.network.ParsedShare(text.trim(), null, SharePlatform.GITHUB)
+            }
             ?: return load()
 
         val url = URL_REGEX
@@ -193,6 +196,11 @@ class ResolveHistoryRepository(
         SharePlatform.BAIDU -> "百度网盘"
         SharePlatform.C139 -> "移动云盘"
         SharePlatform.PAN123 -> "123 云盘"
+        SharePlatform.PAN115 -> "115 网盘"
+        SharePlatform.GUANGYA -> "光鸭云盘"
+        SharePlatform.ILANZOU -> "蓝奏云优享版"
+        SharePlatform.LANZOU -> "蓝奏云"
+        SharePlatform.GITHUB -> "GitHub"
     }
 
     private companion object {

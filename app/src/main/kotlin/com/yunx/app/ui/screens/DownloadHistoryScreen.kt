@@ -39,6 +39,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.core.os.ConfigurationCompat
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.yunx.app.data.db.DownloadTaskEntity
@@ -56,6 +58,7 @@ fun DownloadHistoryScreen(viewModel: DownloadViewModel, onBack: () -> Unit) {
     val completed = tasks.filter { it.status == DownloadTaskEntity.STATUS_COMPLETED }
         .sortedByDescending { if (it.completedTime > 0) it.completedTime else it.createTime }
     val context = LocalContext.current
+    val locale = ConfigurationCompat.getLocales(LocalConfiguration.current)[0] ?: Locale.ROOT
     val snackbarHostState = rememberGlobalSnackbarHostState()
     var pendingDelete by remember { mutableStateOf<DownloadTaskEntity?>(null) }
     var confirmClear by remember { mutableStateOf(false) }
@@ -102,9 +105,9 @@ fun DownloadHistoryScreen(viewModel: DownloadViewModel, onBack: () -> Unit) {
                                 maxLines = 2, overflow = TextOverflow.Ellipsis)
                             val size = if (task.totalSize > 0) task.totalSize else task.downloadedSize
                             val timeLabel = if (task.completedTime > 0) {
-                                "完成于 ${SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(task.completedTime))}"
+                                "完成于 ${SimpleDateFormat("yyyy-MM-dd HH:mm", locale).format(Date(task.completedTime))}"
                             } else {
-                                "完成时间未知（创建于 ${SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(task.createTime))}）"
+                                "完成时间未知（创建于 ${SimpleDateFormat("yyyy-MM-dd HH:mm", locale).format(Date(task.createTime))}）"
                             }
                             Text(
                                 "${android.text.format.Formatter.formatFileSize(context, size)} · $timeLabel",

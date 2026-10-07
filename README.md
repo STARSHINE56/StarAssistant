@@ -6,9 +6,12 @@
 
 ## 功能
 
-- 支持百度网盘、移动云盘、夸克网盘、123 云盘、UC 网盘和迅雷云盘
+- 支持百度网盘、移动云盘、夸克网盘、123 云盘、UC 网盘、迅雷云盘、115 网盘、光鸭云盘、蓝奏云及蓝奏云优享版
 - 分享链接识别、文件列表浏览与保存
-- 下载任务、进度、暂停与继续管理
+- 下载任务、下载历史、进度、暂停、继续与重新下载管理
+- 内置下载器和 Gopeed 引擎切换，共用最大同时下载数；磁力／BT 下载
+- GitHub 仓库浏览和下载、主页收藏快捷方式、云盘新建文件夹
+- 可配置公告来源（默认关闭）、诊断模式及脱敏日志导出
 - 账号信息本地保存及加密备份
 - Material 3 界面、深色模式与主题外观设置
 - 应用内更新检查和崩溃日志导出
@@ -26,7 +29,7 @@
 环境要求：JDK 17、Android SDK 36。
 
 ```bash
-./gradlew testDebugUnitTest assembleDebug
+./gradlew testDebugUnitTest lintDebug assembleDebug
 ```
 
 APK 输出位置：`app/build/outputs/apk/debug/app-debug.apk`。
@@ -47,4 +50,12 @@ APK 输出位置：`app/build/outputs/apk/debug/app-debug.apk`。
 
 ## 反馈
 
-如遇问题，请在 [Issues](https://github.com/STARSHINE56/-/issues) 中提交，并附上系统版本、应用版本、复现步骤以及已脱敏的日志。请勿公开账号、Cookie、Token 或其他隐私信息。
+如遇问题，请在 [Issues](https://github.com/STARSHINE56/StarAssistant/issues) 中提交，并附上系统版本、应用版本、复现步骤以及已脱敏的日志。请勿公开账号、Cookie、Token 或其他隐私信息。
+
+## 1.1.0 上游同步
+
+本次移植固定来自 YunX `v1.2.9`（`ccc862246c95134607af35ebc88537cbb973f553`），保留星辰助手品牌、包名、更新源、历史任务、账号及设置。数据库通过 16 → 17 增量迁移升级，认证备份兼容旧版。
+
+Gopeed Java 桥接类随 APK 提供；原生内核在「设置 → 下载引擎」中获取或导入，与上游一致按设备 ABI 选择 `arm64-v8a`、`armeabi-v7a`、`x86_64` 或 `x86` 的 AAR。下载失败、摘要或 ELF 架构校验失败时不会替换已安装内核。Gopeed 需可写文件系统目录；内置下载器继续支持 SAF 目录。BT 沿用上游默认停止做种设置。
+
+公告来源需在设置中配置自己的 HTTPS 公告 API；未配置时不会请求上游作者公告。自动测试及 APK 构建不能替代真实平台账号和 Android 设备上的验证。

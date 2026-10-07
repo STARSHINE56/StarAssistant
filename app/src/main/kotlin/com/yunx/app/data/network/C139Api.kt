@@ -21,6 +21,7 @@ package com.yunx.app.data.network
 import android.util.Base64
 import com.yunx.app.data.network.model.DownloadLink
 import com.yunx.app.data.network.model.QuotaInfo
+import com.yunx.app.data.network.model.ShareExpire
 import com.yunx.app.data.network.model.ShareFile
 import com.yunx.app.data.network.model.ShareInfo
 import kotlinx.coroutines.Dispatchers
@@ -424,6 +425,29 @@ class C139Api(
         }
     }
 
+    /**
+     * 新建文件夹（个人盘）：`POST /hcy/file/create`（文档 §3.13，靠 `type='folder'` 与上传预创建共用端点）。
+     * `fileRenameMode='force_rename'`：重名由服务端自动改名（文档只列了这个取值，具体后缀格式未写）。
+     *
+     * @param parentFileId 父目录 fileId；本项目的根目录沿用列目录/移动的约定传 `"/"`
+     * @return 新文件夹的 fileId
+     */
+    suspend fun createDir(parentFileId: String, name: String, cookie: String): String =
+        withContext(Dispatchers.IO) {
+            val authorization = C139Constants.extractAuthorization(cookie)
+                ?: throw IllegalStateException("登录态缺少 authorization，请重新登录")
+            val req = JSONObject()
+                .put("parentFileId", parentFileId)
+                .put("name", name)
+                .put("description", "")
+                .put("type", "folder")
+                .put("fileRenameMode", "force_rename")
+            val resp = cloudPost(C139Constants.FILE_CREATE_URL, req.toString(), authorization)
+            checkCloud(resp, "新建文件夹失败")
+            resp.optJSONObject("data")?.optString("fileId")?.takeIf { it.isNotBlank() }
+                ?: throw IllegalStateException("移动云盘未返回文件夹编号")
+        }
+
     /** 重命名 */
     suspend fun renameFile(fileId: String, newName: String, cookie: String): Boolean = withContext(Dispatchers.IO) {
         val authorization = C139Constants.extractAuthorization(cookie)
@@ -501,7 +525,10 @@ class C139Api(
     }
 
     /** 创建分享（getOutLink，需 Cookie + mcloud-skey；提取码系统自动生成）
-     *  @param period 有效期：null=永久 1/7/30=天数
+     *
+     *  @param period 有效期**天数**：null=永久（不传 period 字段）、1/7/30=天数。
+     *    ⚠️ 这里不是 UI 中性码（1/2/3/4），调用方必须先用 [com.yunx.app.data.network.model.ShareExpire.daysOrNull]
+     *    转换——否则「永久」会变成 1 天、「7 天」会变成 3 天（Agent.md §3.20）。
      */
     suspend fun createShare(
         coIDLst: List<String>,
@@ -544,11 +571,13 @@ class C139Api(
             passcode = set.optString("passwd"),
             pwdId = set.optString("linkID"),
             title = dedicatedName,
+            // 139 响应不返回有效期，只能按请求时用的天数回填中性码；未知取值显示「未知」而不是猜「永久」
             expiredType = when (period) {
-                1 -> 2
-                7 -> 3
-                30 -> 4
-                else -> 1
+                null -> ShareExpire.FOREVER
+                1 -> ShareExpire.ONE_DAY
+                7 -> ShareExpire.SEVEN_DAYS
+                30 -> ShareExpire.THIRTY_DAYS
+                else -> ShareExpire.UNKNOWN
             }
         )
     }

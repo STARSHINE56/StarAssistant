@@ -33,13 +33,16 @@ data class ShareFile(
 
 /**
  * 分享信息（云盘功能：创建分享后查询得到的链接与提取码）。
+ * @param warning 非致命提示：分享已创建但某个后续设置没生效（如 115 改有效期失败）。
+ *   界面在弹分享结果的同时用 Snackbar 展示；为空表示一切正常。
  */
 data class ShareInfo(
     val shareUrl: String,
     val passcode: String,
     val pwdId: String,
     val title: String,
-    val expiredType: Int
+    val expiredType: Int,
+    val warning: String? = null
 )
 
 /**
@@ -62,7 +65,13 @@ data class DownloadLink(
     val size: Long,
     val cleanupDirFid: String? = null,
     /** 是否为 HLS（m3u8）转码流地址：下载走 HLS 分片合并路径（UC play 绕过会员墙） */
-    val isHls: Boolean = false
+    val isHls: Boolean = false,
+    /**
+     * 游客（未登录）直链携带的游客态 Cookie（如夸克/UC 的 `__pugs=xxx`）。
+     * 登录态直链为空串 —— 那时下载用登录 Cookie（见 ResolveViewModel.enqueueDownload）；
+     * 游客态下登录 Cookie 不存在，只能靠这份令牌过 CDN 校验（缺了夸克返回 412、UC 返回 403）。
+     */
+    val guestCookie: String = ""
 )
 
 /** UC 转码播放流（绕过非会员视频下载被换成宣传片的问题；url 为 m3u8/fmp4 分片地址） */

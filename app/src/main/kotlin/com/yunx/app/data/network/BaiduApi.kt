@@ -157,8 +157,14 @@ suspend fun listShare(surl: String, sekey: String, dir: String, cookie: String, 
         val json = executeJson(request)
         val errno = json.optInt("errno")
         if (errno != 0) {
-            // 无 sekey 却失败 → 实为加密分享，提示用户索取提取码
-            if (sekey.isBlank()) throw BaiduApiException("该分享需要提取码")
+            // 无 sekey 却失败 → 多数情况是加密分享，提示用户索取提取码。
+            // 但 errno=-6 是「未登录/身份验证失败」（游客模式下常见），此时光提示提取码会让人白找密码，单独区分。
+            if (sekey.isBlank()) {
+                throw BaiduApiException(
+                    if (errno == -6) "该分享需要提取码，或需要登录百度网盘（errno=$errno）"
+                    else "该分享需要提取码（errno=$errno）"
+                )
+            }
             checkErrno(json, "获取分享文件列表失败")
         }
         val array = json.optJSONArray("list") ?: org.json.JSONArray()
@@ -493,14 +499,24 @@ suspend fun listShare(surl: String, sekey: String, dir: String, cookie: String, 
         }.getOrDefault(false)
     }
 
-    /** 百度创建分享结果 */
+    /** 百度创建分享结果
+     *
+     *  @param expiredType 服务端返回的有效期（0永久/1一天/7七天/30三十天）；响应未返回该字段时为 null，
+     *    由调用方回退到用户所选值（别用 0 兜底——0 是「永久有效」，会把创建失败静默显示成永久）。
+     */
     data class BaiduShareResult(
         val link: String,
         val pwd: String,
-        val shareId: String
+        val shareId: String,
+        val expiredType: Int?
     )
 
-    /** 创建分享（share/set，按 fs_id 列表 + 有效期 period + 4 位提取码） */
+    /** 创建分享（share/set，按 fs_id 列表 + 有效期 period + 4 位提取码）
+     *
+     *  @param period 百度 API 的有效期**字面值**：0=永久、1=一天、7=七天、30=三十天。
+     *    ⚠️ 不是 UI 中性码（1/2/3/4），调用方必须先用
+     *    [com.yunx.app.data.network.model.ShareExpire.baiduPeriod] 转换（Agent.md §3.20）。
+     */
     suspend fun createShare(
         fsIds: List<String>,
         period: Int,
@@ -528,7 +544,10 @@ suspend fun listShare(surl: String, sekey: String, dir: String, cookie: String, 
         BaiduShareResult(
             link = link,
             pwd = pwd,
-            shareId = json.optString("shareid")
+            shareId = json.optString("shareid"),
+            // 用 opt + Number 转换：字段缺失 / 显式 null / 非数字一律回 null，
+            // 交给调用方回退到用户所选值（optInt 会把它们变成 0，而 0 是「永久有效」，会显示成假的有效期）
+            expiredType = (json.opt("expiredType") as? Number)?.toInt()
         )
     }
 

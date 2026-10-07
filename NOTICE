@@ -14,3 +14,10 @@ https://github.com/CYQawa/YunX
 
 网盘平台名称、图标及商标归各自权利人所有。本项目与这些平台没有
 隶属、赞助或官方合作关系。
+
+1.1.0 同步来源：YunX v1.2.9
+提交：ccc862246c95134607af35ebc88537cbb973f553
+包括此前版本新增平台、Gopeed／BT、公告、诊断及凭证修复；保留星辰助手定制。
+Gopeed 桥接类来自上游集成，原生内核构建来源：
+https://github.com/CYQawa/yunx_gopeed_build
+https://github.com/GopeedLab/gopeed

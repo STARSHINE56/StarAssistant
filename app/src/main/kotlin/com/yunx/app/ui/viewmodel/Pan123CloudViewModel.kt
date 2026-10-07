@@ -30,6 +30,7 @@ import com.yunx.app.data.download.DownloadPlatform
 import com.yunx.app.data.network.Pan123Api
 import com.yunx.app.data.network.Pan123Constants
 import com.yunx.app.data.network.model.DownloadLink
+import com.yunx.app.data.network.model.ShareExpire
 import com.yunx.app.data.network.model.ShareFile
 import com.yunx.app.data.network.model.ShareInfo
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -405,6 +406,25 @@ class Pan123CloudViewModel(
         }
     }
 
+    /** 新建文件夹（当前目录下）；123 用文件 id，根目录 "0" */
+    fun createFolder(name: String) {
+        val newName = name.trim()
+        if (newName.isEmpty()) return
+        val parentId = (uiState.value as? Pan123CloudUiState.Loaded)?.dirId ?: "0"
+        viewModelScope.launch {
+            isOperating = true
+            try {
+                api.createDir(parentId, newName, token())
+                cloudMessage = "已创建文件夹「$newName」"
+                reloadCurrent()
+            } catch (e: Exception) {
+                cloudMessage = e.message ?: "新建文件夹失败"
+            } finally {
+                isOperating = false
+            }
+        }
+    }
+
     /** 移动 */
     fun moveFile(toDirId: String) {
         val file = actionFile ?: return
@@ -423,8 +443,13 @@ class Pan123CloudViewModel(
         }
     }
 
-    /** 创建分享（有效期选择，可带提取码） */
-    fun shareFile(expirationDays: Int?, sharePwd: String?) {
+    /**
+     * 创建分享（有效期选择，可带提取码）。
+     *
+     * @param expiredType UI 中性码（[ShareExpire]），**必须转成天数**再算 ISO 过期时间：
+     *   直接把中性码当天数会让「永久」变成 now+1 天、「7 天」变成 now+3 天（Agent.md §3.20）。
+     */
+    fun shareFile(expiredType: Int, sharePwd: String?) {
         val file = actionFile ?: return
         viewModelScope.launch {
             isOperating = true
@@ -432,11 +457,11 @@ class Pan123CloudViewModel(
                 val info = api.createShare(
                     fileIds = listOf(file.fid),
                     shareName = file.fname,
-                    expiration = expiration(expirationDays),
+                    expiration = expiration(ShareExpire.daysOrNull(expiredType)),
                     sharePwd = sharePwd,
                     token = token()
                 )
-                shareResult = info.copy(expiredType = expireType(expirationDays))
+                shareResult = info.copy(expiredType = expiredType)
             } catch (e: Exception) {
                 cloudMessage = e.message ?: "分享失败"
             } finally {
@@ -525,8 +550,8 @@ class Pan123CloudViewModel(
         }
     }
 
-    /** 批量分享 */
-    fun shareSelected(expirationDays: Int?, sharePwd: String?) {
+    /** 批量分享（@param expiredType UI 中性码，转换见 [shareFile]） */
+    fun shareSelected(expiredType: Int, sharePwd: String?) {
         val files = _selected.toList()
         if (files.isEmpty()) return
         viewModelScope.launch {
@@ -536,11 +561,11 @@ class Pan123CloudViewModel(
                 val info = api.createShare(
                     fileIds = files.map { it.fid },
                     shareName = title,
-                    expiration = expiration(expirationDays),
+                    expiration = expiration(ShareExpire.daysOrNull(expiredType)),
                     sharePwd = sharePwd,
                     token = token()
                 )
-                shareResult = info.copy(expiredType = expireType(expirationDays))
+                shareResult = info.copy(expiredType = expiredType)
                 exitMultiSelect()
             } catch (e: Exception) {
                 cloudMessage = e.message ?: "分享失败"
@@ -631,7 +656,7 @@ class Pan123CloudViewModel(
         }
     }
 
-    /** 分享有效期 → ISO 过期时间（永久固定 2099，其他 = now + days，+08:00 格式，文档 §5.10） */
+    /** 分享有效期**天数** → ISO 过期时间（null=永久固定 2099，其他 = now + days，+08:00 格式，文档 §5.10） */
     private fun expiration(days: Int?): String {
         if (days == null) return Pan123Constants.EXPIRATION_FOREVER
         val cal = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, days) }
@@ -642,14 +667,6 @@ class Pan123CloudViewModel(
         val abs = kotlin.math.abs(offsetMin)
         return sdf.format(Date(cal.timeInMillis)) +
             String.format("%s%02d:%02d", sign, abs / 60, abs % 60)
-    }
-
-    /** 有效期天数 → ShareResultDialog 的 expiredType（1=永久 2=1天 3=7天 4=30天） */
-    private fun expireType(days: Int?): Int = when (days) {
-        null -> 1
-        1 -> 2
-        7 -> 3
-        else -> 4
     }
 
     class Factory(

@@ -30,4 +30,11 @@ class LogRedactorTest {
         assertFalse(line.contains("jwt-secret"))
         assertEquals("download https://cdn.example Cookie=<redacted> access_token=<redacted>", line)
     }
+    @Test
+    fun hidesJsonPasswordsAndEntireCookieAndBearerValues() {
+        val json = LogRedactor.line("""{"password":"secret phrase","appToken":"token-value","refresh_token":"refresh-value"}""")
+        for (secret in listOf("secret phrase","token-value","refresh-value")) assertFalse(json.contains(secret))
+        val headers = LogRedactor.line("Cookie: sid=one; session=two | Authorization: Bearer three")
+        for (secret in listOf("one","two","three")) assertFalse(headers.contains(secret))
+    }
 }

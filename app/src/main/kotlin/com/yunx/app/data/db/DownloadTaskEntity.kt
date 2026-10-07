@@ -59,6 +59,12 @@ data class DownloadTaskEntity(
     /** 临时直链刷新次数。 */
     @ColumnInfo(defaultValue = "0")
     val refreshCount: Int = 0,
+    /**
+     * 走 Gopeed 引擎下载时的引擎任务 ID；空串 = 这条任务由内置分片下载器执行。
+     * 有值时进度由引擎同步协程回写（见 DownloadManager.startEngineSync），暂停/继续/删除都要转发给引擎。
+     */
+    @ColumnInfo(defaultValue = "''")
+    val engineTaskId: String = "",
     /** 下载完成时的平均速度（字节/秒）；完成态展示用，进行中为 0 */
     @ColumnInfo(defaultValue = "0")
     val avgSpeed: Long = 0,

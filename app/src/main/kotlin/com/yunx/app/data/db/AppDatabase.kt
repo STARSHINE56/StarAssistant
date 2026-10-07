@@ -8,10 +8,11 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.yunx.app.data.security.AndroidKeystoreCredentialCipher
 import com.yunx.app.data.security.CredentialCipher
+import com.yunx.app.data.security.CredentialStore
 
 @Database(
-    entities = [QuarkAccountEntity::class, DownloadTaskEntity::class, UCAccountEntity::class, XunleiAccountEntity::class, BaiduAccountEntity::class, C139AccountEntity::class, Pan123AccountEntity::class, BookmarkEntity::class],
-    version = 16,
+    entities = [QuarkAccountEntity::class, DownloadTaskEntity::class, UCAccountEntity::class, XunleiAccountEntity::class, BaiduAccountEntity::class, C139AccountEntity::class, Pan123AccountEntity::class, Pan115AccountEntity::class, GuangYaAccountEntity::class, ILanzouAccountEntity::class, LanzouAccountEntity::class, BookmarkEntity::class],
+    version = 17,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -30,6 +31,14 @@ abstract class AppDatabase : RoomDatabase() {
 
     abstract fun rawPan123AccountDao(): Pan123AccountDao
 
+    abstract fun rawPan115AccountDao(): Pan115AccountDao
+
+    abstract fun rawGuangYaAccountDao(): GuangYaAccountDao
+
+    abstract fun rawILanzouAccountDao(): ILanzouAccountDao
+
+    abstract fun rawLanzouAccountDao(): LanzouAccountDao
+
     abstract fun bookmarkDao(): BookmarkDao
 
     private lateinit var credentialCipher: CredentialCipher
@@ -40,6 +49,11 @@ abstract class AppDatabase : RoomDatabase() {
     fun baiduAccountDao(): BaiduAccountDao = SecureAccountDaos.baidu(rawBaiduAccountDao(), credentialCipher)
     fun c139AccountDao(): C139AccountDao = SecureAccountDaos.c139(rawC139AccountDao(), credentialCipher)
     fun pan123AccountDao(): Pan123AccountDao = SecureAccountDaos.pan123(rawPan123AccountDao(), credentialCipher)
+
+    fun pan115AccountDao(): Pan115AccountDao = SecureAccountDaos.pan115(rawPan115AccountDao(), credentialCipher)
+    fun guangyaAccountDao(): GuangYaAccountDao = SecureAccountDaos.guangya(rawGuangYaAccountDao(), credentialCipher)
+    fun ilanzouAccountDao(): ILanzouAccountDao = SecureAccountDaos.ilanzou(rawILanzouAccountDao(), credentialCipher)
+    fun lanzouAccountDao(): LanzouAccountDao = SecureAccountDaos.lanzou(rawLanzouAccountDao(), credentialCipher)
 
     companion object {
         @Volatile
@@ -59,13 +73,15 @@ abstract class AppDatabase : RoomDatabase() {
                         MIGRATION_12_13,
                         MIGRATION_13_14,
                         MIGRATION_14_15,
-                        MIGRATION_15_16
+                        MIGRATION_15_16,
+                        MIGRATION_16_17
                     )
                     // 早期开发版（1-8）无可靠 schema；从 v9 起必须保留凭证和下载任务
                     .fallbackToDestructiveMigrationFrom(1, 2, 3, 4, 5, 6, 7, 8)
                     .build()
                     .also { database ->
-                        database.credentialCipher = AndroidKeystoreCredentialCipher()
+                        database.credentialCipher = AndroidKeystoreCredentialCipher.shared
+                        CredentialStore.installRecovery(context)
                         instance = database
                     }
             }
@@ -127,6 +143,11 @@ abstract class AppDatabase : RoomDatabase() {
         private val MIGRATION_15_16 = object : Migration(15, 16) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE download_task ADD COLUMN sourceContext TEXT NOT NULL DEFAULT ''")
+            }
+        }
+        val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                Sync129Schema.statements.forEach(db::execSQL)
             }
         }
     }

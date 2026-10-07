@@ -3,6 +3,7 @@ package com.yunx.app.ui.login
 import android.graphics.Bitmap
 import android.os.Build
 import android.util.Log
+import com.yunx.app.util.DiagnosticLog
 import com.yunx.app.util.LogRedactor
 import android.webkit.CookieManager
 import android.webkit.RenderProcessGoneDetail
@@ -36,7 +37,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.yunx.app.data.network.C139Constants
 import com.yunx.app.ui.viewmodel.C139AccountViewModel
+import com.yunx.app.ui.components.YunXWavyLoading
 import kotlinx.coroutines.launch
 
 private const val TAG = "C139Login"
@@ -100,13 +101,15 @@ fun C139LoginScreen(
             setInitialScale(0)
             // 移动云盘用手机 UA（移动版页面在 WebView 渲染稳定；PC 版 SPA 会因环境检测白屏）
             settings.userAgentString = WebSettings.getDefaultUserAgent(context)
-            webViewClient = object : WebViewClient() {
+            webViewClient = object : DiagnosticWebViewClient() {
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                    DiagnosticLog.webview("page_started", url)
                     Log.d(TAG, "onPageStarted: ${LogRedactor.url(url)}")
                     isLoading = true
                 }
 
                 override fun onPageFinished(view: WebView?, url: String?) {
+                    DiagnosticLog.webview("page_finished", url)
                     Log.d(TAG, "onPageFinished: ${LogRedactor.url(url)}")
                     isLoading = false
                     // 强制覆盖页面 viewport：适配屏幕宽度 + 允许双指缩放（139 移动版页面 viewport 缺失或限制缩放时生效）
@@ -124,6 +127,7 @@ fun C139LoginScreen(
                     request: WebResourceRequest?,
                     error: android.webkit.WebResourceError?
                 ) {
+                    DiagnosticLog.webview("page_error", request?.url?.toString(), code = error?.errorCode ?: -1, summary = "desc=${error?.description} mainFrame=${request?.isForMainFrame}")
                     Log.e(TAG, "onReceivedError: code=${error?.errorCode} desc=${error?.description} origin=${LogRedactor.url(request?.url)}")
                     isLoading = false
                 }
@@ -133,6 +137,7 @@ fun C139LoginScreen(
                     request: WebResourceRequest?,
                     errorResponse: WebResourceResponse?
                 ) {
+                    DiagnosticLog.webview("http_error", request?.url?.toString(), code = errorResponse?.statusCode ?: -1, summary = "mainFrame=${request?.isForMainFrame}")
                     Log.e(TAG, "onReceivedHttpError: status=${errorResponse?.statusCode} reason=${errorResponse?.reasonPhrase} origin=${LogRedactor.url(request?.url)}")
                 }
 
@@ -228,7 +233,7 @@ fun C139LoginScreen(
                 modifier = Modifier.fillMaxSize()
             )
             if (isLoading) {
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                YunXWavyLoading(modifier = Modifier.fillMaxWidth())
             }
         }
     }

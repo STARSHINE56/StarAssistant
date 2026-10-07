@@ -29,7 +29,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -51,6 +50,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.yunx.app.data.network.UCConstants
 import com.yunx.app.ui.viewmodel.UCAccountViewModel
+import com.yunx.app.ui.components.YunXWavyLoading
+import com.yunx.app.util.DiagnosticLog
 import kotlinx.coroutines.launch
 
 /**
@@ -85,11 +86,13 @@ fun UCLoginScreen(
             settings.layoutAlgorithm = WebSettings.LayoutAlgorithm.NARROW_COLUMNS
             setInitialScale(0)
             settings.userAgentString = UCConstants.USER_AGENT
-            webViewClient = object : WebViewClient() {
+            webViewClient = object : DiagnosticWebViewClient() {
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                    DiagnosticLog.webview("page_started", url)
                     isLoading = true
                 }
                 override fun onPageFinished(view: WebView?, url: String?) {
+                    DiagnosticLog.webview("page_finished", url)
                     isLoading = false
                     // 强制覆盖页面 viewport：允许缩放 + 适配屏幕宽度（桌面版页面无 viewport 或限制了缩放时生效）
                     view?.evaluateJavascript(
@@ -159,7 +162,7 @@ fun UCLoginScreen(
     ) { innerPadding ->
         Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
             AndroidView(factory = { webView }, modifier = Modifier.fillMaxSize())
-            if (isLoading) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            if (isLoading) YunXWavyLoading(modifier = Modifier.fillMaxWidth())
         }
     }
 
