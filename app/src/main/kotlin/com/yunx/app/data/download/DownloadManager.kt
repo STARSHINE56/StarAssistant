@@ -586,6 +586,7 @@ class DownloadManager(
         headers: Map<String, String>,
         platform: String
     ) {
+        var createdEngineId: String? = null
         val engineTaskId = try {
             withContext(Dispatchers.IO) {
                 val dir = GopeedEngine.resolveDownloadDir(context)
@@ -601,8 +602,13 @@ class DownloadManager(
                     // 磁力在元数据到手前没有名字：交给引擎自己命名（种子名稍后写回本地记录）
                     name = if (platform == DownloadPlatform.MAGNET) "" else fileName,
                     labels = mapOf("yunxTaskId" to id.toString())
-                )
+                ).also { createdEngineId = it }
             }
+        } catch (e: CancellationException) {
+            withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) {
+                createdEngineId?.let { engineId -> runCatching { GopeedEngine.deleteTask(engineId) } }
+            }
+            throw e
         } catch (e: Throwable) {
             Log.e(TAG, "引擎建任务失败：id=$id ${e.message}", e)
             dao.updateStatus(id, DownloadTaskEntity.STATUS_FAILED)
@@ -673,6 +679,7 @@ class DownloadManager(
                             )
                         }
                         "pause" -> {
+                            if (engineLaunchJobs[task.id]?.isActive == true) continue
                             sharedSlots.release(task.id)
                             dao.updateStatus(task.id, DownloadTaskEntity.STATUS_PAUSED)
                             _stats.update { it - task.id }
@@ -802,7 +809,14 @@ class DownloadManager(
     /** 引擎任务继续：转发 continue 并重新拉起同步 */
     private fun resumeEngineTask(id: Long, engineId: String) {
         launchEngineTask(id) {
-            withContext(Dispatchers.IO) { GopeedEngine.continueTask(engineId) }
+            try {
+                withContext(Dispatchers.IO) { GopeedEngine.continueTask(engineId) }
+            } catch (e: CancellationException) {
+                withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) {
+                    runCatching { GopeedEngine.pauseTask(engineId) }
+                }
+                throw e
+            }
             // 本段运行起点重置：平均速度口径与内置下载器一致（最近一段运行）
             taskStartTimes[id] = System.currentTimeMillis()
             // 继续下载：重新拉起前台服务保活（暂停时刚刚收尾过）
@@ -823,6 +837,10 @@ class DownloadManager(
     suspend fun redownload(id: Long): Boolean {
         var task = dao.get(id) ?: return false
         var headers = loadPersistedHeaders(id)
+        if (MagnetLink.isMagnet(task.url)) {
+            enqueue(url = task.url, fileName = task.fileName, platform = DownloadPlatform.MAGNET)
+            return true
+        }
 
         var probedSize = runCatching { downloader.getTotalSize(task.url, headers) }.getOrNull()
         if (
@@ -1114,9 +1132,14 @@ class DownloadManager(
                     dao.updateRequestHeaders(id, encodeHeaders(it))
                 }
             }
-        }.getOrElse {
-            dao.updateRequestHeaders(id, encodeHeaders(emptyMap()))
-            emptyMap()
+        }.getOrElse { error ->
+            if (!com.yunx.app.data.security.CredentialStore.isKeyLost(error)) {
+                // A locked or temporarily unavailable Keystore must not erase resumable headers.
+                throw error
+            }
+            com.yunx.app.data.security.CredentialStore.markKeyLost()
+            dao.updateRequestHeaders(id, "{}")
+            throw error
         }
     }
 
@@ -1168,22 +1191,44 @@ class DownloadManager(
      * 再次进入应用时把这些任务恢复到安全状态，并自动续传非手动暂停任务。
      */
     suspend fun recoverInterruptedTasks() {
-        startEngineSync()
         cleanupOrphanTempFiles()
         val interrupted = dao.getInterruptedTasks()
-        if (interrupted.isEmpty()) return
-        Log.d(TAG, "recoverInterruptedTasks: count=${interrupted.size}")
-        interrupted.forEach { task ->
-            dao.updateProgress(
-                task.id,
-                DownloadTaskEntity.STATUS_PAUSED,
-                task.downloadedSize,
-                task.totalSize
-            )
+        val engineTasks = dao.listSyncableEngineTasks()
+        val resumableEngineIds = mutableSetOf<Long>()
+        // Stop restored native tasks before allowing either engine to acquire new shared slots.
+        if (engineTasks.isNotEmpty() && GopeedEngine.isInstalled(context)) {
+            withContext(Dispatchers.IO) {
+                runCatching { GopeedEngine.start(context, GopeedEngine.resolveDownloadDir(context)) }
+            }.onSuccess {
+                for (task in engineTasks) {
+                    val status = runCatching { withContext(Dispatchers.IO) { GopeedEngine.taskStatus(task.engineTaskId) } }.getOrNull()
+                    if (status?.status == "done") {
+                        completeEngineTask(task, status.total)
+                        continue
+                    }
+                    val paused = runCatching { withContext(Dispatchers.IO) { GopeedEngine.pauseTask(task.engineTaskId) } }.isSuccess
+                    dao.updateStatus(task.id, DownloadTaskEntity.STATUS_PAUSED)
+                    if (paused && !task.manualPaused) resumableEngineIds.add(task.id)
+                }
+            }
         }
-        interrupted
-            .filter { !it.manualPaused && it.engineTaskId.isBlank() }
-            .forEach { task -> start(task.id) }
+        interrupted.filter { it.engineTaskId.isBlank() }.forEach { task ->
+            dao.updateProgress(task.id, DownloadTaskEntity.STATUS_PAUSED, task.downloadedSize, task.totalSize)
+        }
+        startEngineSync()
+        interrupted.filter { !it.manualPaused && it.engineTaskId.isBlank() }.forEach { start(it.id) }
+        resumableEngineIds.forEach { start(it) }
+    }
+
+    /** Update native limits without waking tasks that do not own the shared budget. */
+    fun updateConcurrencyLimit() {
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                GopeedEngine.applyMaxRunning(context) { engineId ->
+                    taskEngineIds.entries.any { (id, value) -> value == engineId && sharedSlots.contains(id) }
+                }
+            }.onFailure { Log.w(TAG, "更新引擎并发上限失败", it) }
+        }
     }
 
     /** Acquire one shared slot atomically; read the current limit each iteration. */
