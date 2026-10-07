@@ -20,8 +20,10 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Accept Android licenses
-        run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+      - name: Install Android SDK components
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-36" "build-tools;35.0.0" || true
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
       - name: Apply patch
         run: |
@@ -29,7 +31,7 @@ jobs:
           git apply /tmp/update.patch
 
       - name: Build and test
-        run: ./gradlew testDebugUnitTest lintDebug assembleDebug --no-daemon --console=plain
+        run: ./gradlew testDebugUnitTest lintDebug assembleDebug --no-daemon --console=plain --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
