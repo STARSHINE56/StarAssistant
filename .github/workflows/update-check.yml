@@ -21,88 +21,10 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Patch SettingsScreen.kt
+      - name: Apply patch
         run: |
-          FILE=app/src/main/kotlin/com/yunx/app/ui/screens/SettingsScreen.kt
-          
-          # 1. 加 onCheckUpdate 参数（在 onConcurrencyChanged 后面）
-          sed -i '/onConcurrencyChanged: () -> Unit = {},/a\    onCheckUpdate: () -> Unit = {},' "$FILE"
-          
-          # 2. 把"软件官网"项替换成"检查更新"
-          python3 << 'PYEOF'
-          import re
-          path = "app/src/main/kotlin/com/yunx/app/ui/screens/SettingsScreen.kt"
-          with open(path, "r", encoding="utf-8") as f:
-            content = f.read()
-          
-          old = '''        SettingsItem(
-            icon = Icons.Outlined.SystemUpdate,
-            title = "软件官网",
-            description = "访问软件官方网站",
-            onClick = {
-                val intent = Intent(
-                    Intent.ACTION_VIEW,
-                    Uri.parse("https://link3.cc/starshine9")
-                )
-                context.startActivity(intent)
-            }
-        )'''
-          
-          new = '''        SettingsItem(
-            icon = Icons.Outlined.SystemUpdate,
-            title = "检查更新",
-            description = "检查是否有新版本",
-            onClick = onCheckUpdate
-        )'''
-          
-          content = content.replace(old, new)
-          
-          with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
-          print("SettingsScreen.kt patched")
-          PYEOF
-
-      - name: Patch MainScreen.kt
-        run: |
-          python3 << 'PYEOF'
-          path = "app/src/main/kotlin/com/yunx/app/ui/MainScreen.kt"
-          with open(path, "r", encoding="utf-8") as f:
-            content = f.read()
-          
-          old = '''                        onGopeedClick = { showGopeed = true },
-                        onConcurrencyChanged = { downloadManager.updateConcurrencyLimit() },'''
-          
-          new = '''                        onGopeedClick = { showGopeed = true },
-                        onConcurrencyChanged = { downloadManager.updateConcurrencyLimit() },
-                        onCheckUpdate = {
-                            SnackbarController.show("正在检查更新…")
-                            scope.launch {
-                                val result = UpdateChecker.fetchLatestRelease(
-                                    includePrerelease = com.yunx.app.ui.theme.ThemeController.acceptPrereleaseUpdate
-                                )
-                                when (result) {
-                                    is UpdateChecker.CheckResult.Success -> {
-                                        val current = UpdateChecker.currentVersion(context)
-                                        if (UpdateChecker.compareVersions(result.release.tagName, current) > 0) {
-                                            pendingRelease = result.release
-                                            showUpdateDialog = true
-                                        } else {
-                                            SnackbarController.show("当前已是最新版本 v$current")
-                                        }
-                                    }
-                                    is UpdateChecker.CheckResult.Failure -> {
-                                        SnackbarController.show("检查更新失败：${result.reason}")
-                                    }
-                                }
-                            }
-                        },'''
-          
-          content = content.replace(old, new)
-          
-          with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
-          print("MainScreen.kt patched")
-          PYEOF
+          echo 'ZGlmZiAtLWdpdCBhL2FwcC9zcmMvbWFpbi9rb3RsaW4vY29tL3l1bngvYXBwL3VpL01haW5TY3JlZW4ua3QgYi9hcHAvc3JjL21haW4va290bGluL2NvbS95dW54L2FwcC91aS9NYWluU2NyZWVuLmt0CmluZGV4IDUyMGI0NzQuLmI1MGIyNzAgMTAwNjQ0Ci0tLSBhL2FwcC9zcmMvbWFpbi9rb3RsaW4vY29tL3l1bngvYXBwL3VpL01haW5TY3JlZW4ua3QKKysrIGIvYXBwL3NyYy9tYWluL2tvdGxpbi9jb20veXVueC9hcHAvdWkvTWFpblNjcmVlbi5rdApAQCAtMTA0OCw2ICsxMDQ4LDI4IEBAIGZ1biBNYWluU2NyZWVuKCkgewogICAgICAgICAgICAgICAgICAgICAgICAgYmFja3VwTWFuYWdlciA9IGJhY2t1cE1hbmFnZXIsCiAgICAgICAgICAgICAgICAgICAgICAgICBvbkdvcGVlZENsaWNrID0geyBzaG93R29wZWVkID0gdHJ1ZSB9LAogICAgICAgICAgICAgICAgICAgICAgICAgb25Db25jdXJyZW5jeUNoYW5nZWQgPSB7IGRvd25sb2FkTWFuYWdlci51cGRhdGVDb25jdXJyZW5jeUxpbWl0KCkgfSwKKyAgICAgICAgICAgICAgICAgICAgICAgIG9uQ2hlY2tVcGRhdGUgPSB7CisgICAgICAgICAgICAgICAgICAgICAgICAgICAgU25hY2tiYXJDb250cm9sbGVyLnNob3coIuato+WcqOajgOafpeabtOaWsOKApiIpCisgICAgICAgICAgICAgICAgICAgICAgICAgICAgc2NvcGUubGF1bmNoIHsKKyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgdmFsIHJlc3VsdCA9IFVwZGF0ZUNoZWNrZXIuZmV0Y2hMYXRlc3RSZWxlYXNlKAorICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgaW5jbHVkZVByZXJlbGVhc2UgPSBjb20ueXVueC5hcHAudWkudGhlbWUuVGhlbWVDb250cm9sbGVyLmFjY2VwdFByZXJlbGVhc2VVcGRhdGUKKyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgKQorICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICB3aGVuIChyZXN1bHQpIHsKKyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGlzIFVwZGF0ZUNoZWNrZXIuQ2hlY2tSZXN1bHQuU3VjY2VzcyAtPiB7CisgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgdmFsIGN1cnJlbnQgPSBVcGRhdGVDaGVja2VyLmN1cnJlbnRWZXJzaW9uKGNvbnRleHQpCisgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgaWYgKFVwZGF0ZUNoZWNrZXIuY29tcGFyZVZlcnNpb25zKHJlc3VsdC5yZWxlYXNlLnRhZ05hbWUsIGN1cnJlbnQpID4gMCkgeworICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBwZW5kaW5nUmVsZWFzZSA9IHJlc3VsdC5yZWxlYXNlCisgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHNob3dVcGRhdGVEaWFsb2cgPSB0cnVlCisgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgfSBlbHNlIHsKKyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgU25hY2tiYXJDb250cm9sbGVyLnNob3coIuW9k+WJjeW3suaYr+acgOaWsOeJiOacrCB2JGN1cnJlbnQiKQorICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIH0KKyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIH0KKyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGlzIFVwZGF0ZUNoZWNrZXIuQ2hlY2tSZXN1bHQuRmFpbHVyZSAtPiB7CisgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgU25hY2tiYXJDb250cm9sbGVyLnNob3coIuajgOafpeabtOaWsOWksei0pe+8miR7cmVzdWx0LnJlYXNvbn0iKQorICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgfQorICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICB9CisgICAgICAgICAgICAgICAgICAgICAgICAgICAgfQorICAgICAgICAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICAgICAgICAgICAgIG9uRG93bmxvYWRVcGRhdGVBcGsgPSB7IHVybCwgbmFtZSAtPgogICAgICAgICAgICAgICAgICAgICAgICAgICAgIHNjb3BlLmxhdW5jaCB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGRvd25sb2FkTWFuYWdlci5lbnF1ZXVlKHVybCA9IHVybCwgZmlsZU5hbWUgPSBuYW1lKQpkaWZmIC0tZ2l0IGEvYXBwL3NyYy9tYWluL2tvdGxpbi9jb20veXVueC9hcHAvdWkvc2NyZWVucy9TZXR0aW5nc1NjcmVlbi5rdCBiL2FwcC9zcmMvbWFpbi9rb3RsaW4vY29tL3l1bngvYXBwL3VpL3NjcmVlbnMvU2V0dGluZ3NTY3JlZW4ua3QKaW5kZXggN2QzNjMwYi4uZDlhZDE5OSAxMDA2NDQKLS0tIGEvYXBwL3NyYy9tYWluL2tvdGxpbi9jb20veXVueC9hcHAvdWkvc2NyZWVucy9TZXR0aW5nc1NjcmVlbi5rdAorKysgYi9hcHAvc3JjL21haW4va290bGluL2NvbS95dW54L2FwcC91aS9zY3JlZW5zL1NldHRpbmdzU2NyZWVuLmt0CkBAIC0xMTUsNiArMTE1LDcgQEAgZnVuIFNldHRpbmdzU2NyZWVuKAogICAgIGJhY2t1cE1hbmFnZXI6IEF1dGhCYWNrdXBNYW5hZ2VyLAogICAgIG9uR29wZWVkQ2xpY2s6ICgpIC0+IFVuaXQgPSB7fSwKICAgICBvbkNvbmN1cnJlbmN5Q2hhbmdlZDogKCkgLT4gVW5pdCA9IHt9LAorICAgIG9uQ2hlY2tVcGRhdGU6ICgpIC0+IFVuaXQgPSB7fSwKICAgICAvLyDkv53nlZnmraTlj4LmlbDku6XlhbzlrrkgTWFpblNjcmVlbiDkuK3njrDmnInnmoTosIPnlKjjgIIKICAgICBvbkRvd25sb2FkVXBkYXRlQXBrOiAodXJsOiBTdHJpbmcsIGZpbGVOYW1lOiBTdHJpbmcpIC0+IFVuaXQsCiAgICAgbW9kaWZpZXI6IE1vZGlmaWVyID0gTW9kaWZpZXIKQEAgLTUxNCwxNSArNTE1LDkgQEAgZnVuIFNldHRpbmdzU2NyZWVuKAogCiAgICAgICAgIFNldHRpbmdzSXRlbSgKICAgICAgICAgICAgIGljb24gPSBJY29ucy5PdXRsaW5lZC5TeXN0ZW1VcGRhdGUsCi0gICAgICAgICAgICB0aXRsZSA9ICLova/ku7blrpjnvZEiLAotICAgICAgICAgICAgZGVzY3JpcHRpb24gPSAi6K6/6Zeu6L2v5Lu25a6Y5pa5572R56uZIiwKLSAgICAgICAgICAgIG9uQ2xpY2sgPSB7Ci0gICAgICAgICAgICAgICAgdmFsIGludGVudCA9IEludGVudCgKLSAgICAgICAgICAgICAgICAgICAgSW50ZW50LkFDVElPTl9WSUVXLAotICAgICAgICAgICAgICAgICAgICBVcmkucGFyc2UoImh0dHBzOi8vbGluazMuY2Mvc3RhcnNoaW5lOSIpCi0gICAgICAgICAgICAgICAgKQotICAgICAgICAgICAgICAgIGNvbnRleHQuc3RhcnRBY3Rpdml0eShpbnRlbnQpCi0gICAgICAgICAgICB9CisgICAgICAgICAgICB0aXRsZSA9ICLmo4Dmn6Xmm7TmlrAiLAorICAgICAgICAgICAgZGVzY3JpcHRpb24gPSAi5qOA5p+l5piv5ZCm5pyJ5paw54mI5pysIiwKKyAgICAgICAgICAgIG9uQ2xpY2sgPSBvbkNoZWNrVXBkYXRlCiAgICAgICAgICkKIAogICAgICAgICBTcGFjZXIobW9kaWZpZXIgPSBNb2RpZmllci5oZWlnaHQoNi5kcCkpCg==' | base64 -d > /tmp/update.patch
+          git apply /tmp/update.patch
 
       - name: Build and test
         run: ./gradlew testDebugUnitTest lintDebug assembleDebug --no-daemon --console=plain
@@ -113,7 +35,7 @@ jobs:
           name: 星辰助手-1.1.0
           path: app/build/outputs/apk/debug/app-debug.apk
 
-      - name: Commit and push changes
+      - name: Commit and push
         run: |
           git config user.name "STARSHINE56"
           git config user.email "starshine9@users.noreply.github.com"
