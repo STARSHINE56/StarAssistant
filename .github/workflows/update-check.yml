@@ -1,0 +1,122 @@
+name: Apply Update Check Fix
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Patch SettingsScreen.kt
+        run: |
+          FILE=app/src/main/kotlin/com/yunx/app/ui/screens/SettingsScreen.kt
+          
+          # 1. 加 onCheckUpdate 参数（在 onConcurrencyChanged 后面）
+          sed -i '/onConcurrencyChanged: () -> Unit = {},/a\    onCheckUpdate: () -> Unit = {},' "$FILE"
+          
+          # 2. 把"软件官网"项替换成"检查更新"
+          python3 << 'PYEOF'
+          import re
+          path = "app/src/main/kotlin/com/yunx/app/ui/screens/SettingsScreen.kt"
+          with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+          
+          old = '''        SettingsItem(
+            icon = Icons.Outlined.SystemUpdate,
+            title = "软件官网",
+            description = "访问软件官方网站",
+            onClick = {
+                val intent = Intent(
+                    Intent.ACTION_VIEW,
+                    Uri.parse("https://link3.cc/starshine9")
+                )
+                context.startActivity(intent)
+            }
+        )'''
+          
+          new = '''        SettingsItem(
+            icon = Icons.Outlined.SystemUpdate,
+            title = "检查更新",
+            description = "检查是否有新版本",
+            onClick = onCheckUpdate
+        )'''
+          
+          content = content.replace(old, new)
+          
+          with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+          print("SettingsScreen.kt patched")
+          PYEOF
+
+      - name: Patch MainScreen.kt
+        run: |
+          python3 << 'PYEOF'
+          path = "app/src/main/kotlin/com/yunx/app/ui/MainScreen.kt"
+          with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+          
+          old = '''                        onGopeedClick = { showGopeed = true },
+                        onConcurrencyChanged = { downloadManager.updateConcurrencyLimit() },'''
+          
+          new = '''                        onGopeedClick = { showGopeed = true },
+                        onConcurrencyChanged = { downloadManager.updateConcurrencyLimit() },
+                        onCheckUpdate = {
+                            SnackbarController.show("正在检查更新…")
+                            scope.launch {
+                                val result = UpdateChecker.fetchLatestRelease(
+                                    includePrerelease = com.yunx.app.ui.theme.ThemeController.acceptPrereleaseUpdate
+                                )
+                                when (result) {
+                                    is UpdateChecker.CheckResult.Success -> {
+                                        val current = UpdateChecker.currentVersion(context)
+                                        if (UpdateChecker.compareVersions(result.release.tagName, current) > 0) {
+                                            pendingRelease = result.release
+                                            showUpdateDialog = true
+                                        } else {
+                                            SnackbarController.show("当前已是最新版本 v$current")
+                                        }
+                                    }
+                                    is UpdateChecker.CheckResult.Failure -> {
+                                        SnackbarController.show("检查更新失败：${result.reason}")
+                                    }
+                                }
+                            }
+                        },'''
+          
+          content = content.replace(old, new)
+          
+          with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+          print("MainScreen.kt patched")
+          PYEOF
+
+      - name: Build and test
+        run: ./gradlew testDebugUnitTest lintDebug assembleDebug --no-daemon --console=plain
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: 星辰助手-1.1.0
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Commit and push changes
+        run: |
+          git config user.name "STARSHINE56"
+          git config user.email "starshine9@users.noreply.github.com"
+          git add -A
+          git diff --staged --quiet || git commit -m "fix: replace website entry with manual update check"
+          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/STARSHINE56/StarAssistant.git main
