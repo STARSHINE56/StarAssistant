@@ -182,11 +182,11 @@ fun ResolveScreen(
         val parsed =
             ShareLinkParser.parse(rawLink)
 
-        if (parsed != null) {
+        if (parsed != null || GitHubLinkParser.parse(rawLink) != null) {
             recentHistory =
                 historyRepository.add(
                     rawLink,
-                    password ?: parsed.pwd
+                    password ?: parsed?.pwd
                 )
         }
 
@@ -246,7 +246,7 @@ fun ResolveScreen(
             text.isNotBlank() &&
             text != link &&
             text != ignoredClipboard &&
-            (ShareLinkParser.parse(text) != null || GitHubLinkParser.parse(text) != null)
+            (ShareLinkParser.parse(text) != null || GitHubLinkParser.parse(text) != null || com.yunx.app.data.network.XunleiKouling.looksLikeKouling(text))
         ) {
             clipboardSuggestion = text
         }
@@ -493,7 +493,7 @@ fun ResolveScreen(
                                         clipboardText
                                     )
 
-                                if (parsed == null && GitHubLinkParser.parse(clipboardText) == null) {
+                                if (parsed == null && GitHubLinkParser.parse(clipboardText) == null && !com.yunx.app.data.network.XunleiKouling.looksLikeKouling(clipboardText)) {
                                     SnackbarController.show(
                                         "未检测到支持的分享链接"
                                     )
@@ -514,7 +514,7 @@ fun ResolveScreen(
                                         clipboardText
 
                                     SnackbarController.show(
-                                        "已识别${parsed?.let { platformLabel(it.platform) } ?: "GitHub"}链接"
+                                        "已识别${parsed?.let { platformLabel(it.platform) } ?: if (GitHubLinkParser.parse(clipboardText) != null) "GitHub" else "迅雷口令"}链接"
                                     )
                                 }
                             }

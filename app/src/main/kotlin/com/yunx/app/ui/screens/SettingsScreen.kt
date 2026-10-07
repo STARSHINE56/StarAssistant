@@ -114,6 +114,7 @@ fun SettingsScreen(
     onSupportClick: () -> Unit,
     backupManager: AuthBackupManager,
     onGopeedClick: () -> Unit = {},
+    onConcurrencyChanged: () -> Unit = {},
     // 保留此参数以兼容 MainScreen 中现有的调用。
     onDownloadUpdateApk: (url: String, fileName: String) -> Unit,
     modifier: Modifier = Modifier
@@ -983,6 +984,7 @@ fun SettingsScreen(
                                 onClick = {
                                     maxConcurrent = v
                                     settingsRepo.maxConcurrentDownloads = v
+                                    onConcurrencyChanged()
                                     showConcurrencyDialog = false
                                 }
                             )
