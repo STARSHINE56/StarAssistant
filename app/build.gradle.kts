@@ -17,12 +17,12 @@ android {
         targetSdk = 34
 
         versionCode = providers.gradleProperty("VERSION_CODE")
-            .orElse("10")
+            .orElse("1001010")
             .get()
             .toInt()
 
         versionName = providers.gradleProperty("VERSION_NAME")
-            .orElse("1.0.0")
+            .orElse("1.1.0")
             .get()
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -58,6 +58,8 @@ android {
         }
     }
 
+    testOptions { unitTests.isReturnDefaultValues = true }
+
     buildFeatures {
         compose = true
     }
@@ -86,6 +88,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
+    implementation(files("libs/gopeed-classes.jar"))
+    implementation("com.mikepenz:multiplatform-markdown-renderer-m3:0.35.0")
     implementation(libs.material)
 
     implementation(libs.room.runtime)
@@ -106,6 +110,8 @@ dependencies {
     implementation(libs.androidx.material3)
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
+    testImplementation("org.xerial:sqlite-jdbc:3.46.1.3")
 
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
