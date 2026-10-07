@@ -18,8 +18,8 @@
 
 package com.yunx.app.ui.resolve
 
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.basicMarquee
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
@@ -37,9 +37,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
@@ -49,6 +50,7 @@ import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.CloudUpload
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.InsertDriveFile
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.MoreVert
@@ -59,10 +61,14 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.ui.graphics.Color
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -79,6 +85,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -86,32 +93,44 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import com.yunx.app.data.db.BookmarkEntity
+import com.yunx.app.data.network.SharePlatform
 import com.yunx.app.data.network.model.ShareFile
 import com.yunx.app.data.network.model.ShareSession
 import com.yunx.app.data.prefs.SettingsRepository
+import com.yunx.app.ui.components.FileNameText
 import com.yunx.app.ui.components.ScrollToTopButton
+import com.yunx.app.ui.components.YunXLoading
 import com.yunx.app.ui.items.MultiSelectAction
 import com.yunx.app.ui.items.MultiSelectBar
 import com.yunx.app.ui.screens.AddToBookmarkDialog
-import com.yunx.app.ui.screens.BaiduSaveSheet
-import com.yunx.app.ui.screens.C139SaveSheet
-import com.yunx.app.ui.screens.Pan123SaveSheet
-import com.yunx.app.ui.screens.SaveToCloudSheet
-import com.yunx.app.ui.screens.UCSaveSheet
-import com.yunx.app.ui.screens.XunleiSaveSheet
+import com.yunx.app.ui.screens.BaiduSaveContent
+import com.yunx.app.ui.screens.C139SaveContent
+import com.yunx.app.ui.screens.GuangYaSaveContent
+import com.yunx.app.ui.screens.Pan115SaveContent
+import com.yunx.app.ui.screens.Pan123SaveContent
+import com.yunx.app.ui.screens.SaveToCloudContent
+import com.yunx.app.ui.screens.UCSaveContent
+import com.yunx.app.ui.screens.XunleiSaveContent
 import com.yunx.app.ui.viewmodel.BaiduCloudViewModel
 import com.yunx.app.ui.viewmodel.C139CloudViewModel
+import com.yunx.app.ui.viewmodel.GuangYaCloudViewModel
+import com.yunx.app.ui.viewmodel.Pan115CloudViewModel
 import com.yunx.app.ui.viewmodel.Pan123CloudViewModel
 import com.yunx.app.ui.viewmodel.QuarkCloudViewModel
 import com.yunx.app.ui.viewmodel.ResolveViewModel
 import com.yunx.app.ui.viewmodel.UCCoudViewModel
 import com.yunx.app.ui.viewmodel.XunleiCloudViewModel
+import com.yunx.app.ui.theme.ListGroupGap
+import com.yunx.app.ui.theme.effectsDefault
+import com.yunx.app.ui.theme.effectsFast
+import com.yunx.app.ui.theme.listGroupShape
+import com.yunx.app.ui.theme.spatialDefault
+import com.yunx.app.ui.theme.spatialFast
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -142,6 +161,10 @@ fun ShareDetailScreen(
     ucCloudViewModel: UCCoudViewModel,
     /** 123 云盘浏览 ViewModel（123 分享转存目录选择用） */
     pan123CloudViewModel: Pan123CloudViewModel,
+    /** 115 网盘浏览 ViewModel（115 分享转存目录选择用） */
+    pan115CloudViewModel: Pan115CloudViewModel,
+    /** 光鸭云盘浏览 ViewModel（光鸭分享转存目录选择用） */
+    guangyaCloudViewModel: GuangYaCloudViewModel,
     scrollBehavior: TopAppBarScrollBehavior,
     /** 文件列表滚动状态（由上层持有，跨目录切换保留） */
     listState: LazyListState,
@@ -151,6 +174,16 @@ fun ShareDetailScreen(
     onExit: () -> Unit,
     /** 列表「返回上一级」：子目录回上级，根目录回输入页 */
     onBack: () -> Unit,
+    /** 顶部额外内容（标题/面包屑之后）：GitHub 用于显示「forked from」 */
+    extraHeaderContent: @Composable (() -> Unit)? = null,
+    /** 列表底部额外内容（items 之后）：GitHub 用于显示 README 原文 */
+    extraFooterContent: @Composable (() -> Unit)? = null,
+    /** 文件行徽章（文件名旁）：GitHub 用于 Releases 最新/预发布/草稿、账号 repo Fork/语言 */
+    fileBadge: @Composable ((ShareFile) -> Unit)? = null,
+    /** 下拉刷新回调（仅 GitHub 平台传入）；null 时不启用下拉刷新，非 GitHub 平台行为不变 */
+    onRefresh: (() -> Unit)? = null,
+    /** 是否正在刷新（下拉刷新指示器状态） */
+    refreshing: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val pathNames = viewModel.pathNames
@@ -162,6 +195,8 @@ fun ShareDetailScreen(
     var pendingBaiduAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     // 「添加至收藏」弹窗
     var showAddBookmark by remember { mutableStateOf(false) }
+    // 文件操作弹窗（点击文件行 / 文件夹行尾「更多」打开）：下载 / 转存
+    var actionFile by remember { mutableStateOf<ShareFile?>(null) }
 
     /** 百度分享下载前检查：>300MB 且未忽略时弹提示，确认后执行 */
     fun checkBaiduLimit(file: ShareFile, proceed: () -> Unit) {
@@ -191,6 +226,8 @@ fun ShareDetailScreen(
         listState.scrollToItem(scrollPositions[currentDirKey] ?: 0)
     }
     // 多选模式：底部批量操作栏 + 处理中弹窗
+    // 内容抽成 lambda：仅 GitHub 平台包 PullToRefreshBox 下拉刷新，非 GitHub 路径原样渲染
+    val listContent: @Composable () -> Unit = {
     Box(modifier = modifier.fillMaxSize()) {
         LazyColumn(
             state = listState,
@@ -201,10 +238,11 @@ fun ShareDetailScreen(
                         start = 16.dp, end = 16.dp, top = 16.dp,
                         bottom = if (viewModel.multiSelectMode) 96.dp else 16.dp
                     ),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            // 列表组：各项首尾相接（组内间距用 ListGroupGap），行圆角按首/中/末分段给
+            verticalArrangement = Arrangement.spacedBy(ListGroupGap)
         ) {
             item {
-                Column {
+                Column(modifier = Modifier.padding(bottom = 8.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         if (viewModel.multiSelectMode) {
                             // 多选模式：取消选择
@@ -279,8 +317,8 @@ fun ShareDetailScreen(
                     // 搜索框（点击放大镜展开；与面包屑保持间距 + 展开/收起动画）
                     AnimatedVisibility(
                         visible = showSearch && !viewModel.multiSelectMode,
-                        enter = expandVertically(tween(180)) + fadeIn(tween(180)),
-                        exit = shrinkVertically(tween(140)) + fadeOut(tween(120))
+                        enter = expandVertically(spatialDefault()) + fadeIn(effectsDefault()),
+                        exit = shrinkVertically(spatialFast()) + fadeOut(effectsFast())
                     ) {
                         Column {
                             Spacer(modifier = Modifier.height(10.dp))
@@ -302,17 +340,29 @@ fun ShareDetailScreen(
                             )
                         }
                     }
+                    // 顶部额外内容（GitHub：forked from 等）
+                    extraHeaderContent?.let { header ->
+                        Spacer(modifier = Modifier.height(6.dp))
+                        header()
+                    }
+                    // 游客模式（未登录）：列表可用；夸克/UC 可直接下载，其余平台下载/转存需登录 —— 常驻一行说明，避免点了才报错
+                    if (viewModel.isGuest) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        GuestBrowseNotice(viewModel.sharePlatform)
+                    }
                 }
             }
 
-            // 返回上一级（单独列表项；根目录时不显示）
+            // 返回上一级（独立于文件列表组，故自带下间距）
             if (pathNames.isNotEmpty()) {
                 item {
-                    BackToParentItem(onClick = {
-                        // 记录当前目录滚动位置，返回上级后恢复上级位置
-                        scrollPositions[currentDirKey] = listState.firstVisibleItemIndex
-                        onBack()
-                    })
+                    Column(modifier = Modifier.padding(bottom = 8.dp)) {
+                        BackToParentItem(onClick = {
+                            // 记录当前目录滚动位置，返回上级后恢复上级位置
+                            scrollPositions[currentDirKey] = listState.firstVisibleItemIndex
+                            onBack()
+                        })
+                    }
                 }
             }
 
@@ -330,9 +380,10 @@ fun ShareDetailScreen(
                 }
             }
 
-            items(displayFiles, key = { it.fid }) { file ->
+            itemsIndexed(displayFiles, key = { _, f -> f.fid }) { index, file ->
                 ShareFileRow(
                     file = file,
+                    shape = listGroupShape(index, displayFiles.size),
                     onClick = {
                         if (viewModel.multiSelectMode) {
                             viewModel.toggleSelect(file)
@@ -341,12 +392,14 @@ fun ShareDetailScreen(
                             scrollPositions[currentDirKey] = listState.firstVisibleItemIndex
                             viewModel.openFolder(file)
                         } else {
-                            checkBaiduLimit(file) { viewModel.fetchDownloadLink(file) }
+                            // 文件：先弹文件操作弹窗（下载/转存），不再直接进入下载流程
+                            actionFile = file
                         }
                     },
-                    // 仅夸克分享显示转存按钮（多选时隐藏）
-                    onSave = if (!viewModel.multiSelectMode && viewModel.canSave) {
-                        { viewModel.requestSave(file) }
+                    // 文件夹点击是进入目录，故用行尾「更多」打开同一个弹窗（与网盘页一致）；
+                    // 文件点击即弹窗，不再需要行尾按钮（原来的「转存」图标已统一进弹窗）
+                    onMore = if (!viewModel.multiSelectMode && file.isdir) {
+                        { actionFile = file }
                     } else {
                         null
                     },
@@ -356,8 +409,16 @@ fun ShareDetailScreen(
                         null
                     },
                     selected = viewModel.selected.contains(file),
-                    showCheckbox = viewModel.multiSelectMode
+                    showCheckbox = viewModel.multiSelectMode,
+                    badge = fileBadge?.let { b -> { b(file) } }
                 )
+            }
+
+            // 列表底部额外内容（GitHub：README 原文）
+            extraFooterContent?.let { footer ->
+                item(key = "extra_footer") {
+                    footer()
+                }
             }
         }
 
@@ -400,6 +461,20 @@ fun ShareDetailScreen(
                 }
             )
         }
+    }
+    }
+
+    // 仅传入 onRefresh（GitHub 平台）时启用下拉刷新；否则原样渲染内容
+    if (onRefresh != null) {
+        PullToRefreshBox(
+            isRefreshing = refreshing,
+            onRefresh = onRefresh,
+            modifier = Modifier.fillMaxSize()
+        ) {
+            listContent()
+        }
+    } else {
+        listContent()
     }
 
     // 百度 >300MB 限速提示弹窗（解析页百度分享下载，可勾选不再显示）
@@ -451,10 +526,7 @@ fun ShareDetailScreen(
             title = { Text("批量处理中") },
             text = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(24.dp),
-                        strokeWidth = 2.dp
-                    )
+                    YunXLoading(modifier = Modifier.size(24.dp))
                     Spacer(modifier = Modifier.width(12.dp))
                     Text(
                         text = viewModel.batchProgress?.let { "正在获取下载链接 $it" }
@@ -480,38 +552,89 @@ fun ShareDetailScreen(
         )
     }
 
-    // 转存弹窗：浏览网盘目录并保存（单文件转存；夸克/迅雷/百度按平台选目录选择器）
-    if (viewModel.saveTarget != null) {
-        when {
-            viewModel.isSaveXunlei -> XunleiSaveSheet(
-                resolveViewModel = viewModel,
-                cloudViewModel = xunleiCloudViewModel,
-                onDismiss = { viewModel.dismissSave() }
+    // 文件操作弹窗（点击文件行 / 文件夹行尾「更多」）：下载 / 转存
+    // 与网盘页同一形态（ModalBottomSheet + 文件信息 + 操作项）；弹窗内部先播放退场动画再动作，
+    // 所以这里一关弹窗就执行动作不会出现「弹窗瞬间消失」或与下载链接弹窗/转存弹窗重叠。
+    actionFile?.let { file ->
+        ResolveFileActionSheet(
+            file = file,
+            canSave = viewModel.canSave,
+            saving = viewModel.isSaving,
+            onDownload = {
+                actionFile = null
+                // 百度分享 >300MB 限速提示（与原来直接点击文件时一致）
+                checkBaiduLimit(file) { viewModel.fetchDownloadLink(file) }
+            },
+            onDownloadFolder = {
+                actionFile = null
+                viewModel.downloadFolder(file)
+            },
+            // 不关弹窗：准备好转存状态后弹窗内部切到转存步骤（内容淡入淡出，不再另开一个弹窗）
+            // 游客模式例外：转存会被 ViewModel 拦下并弹 Snackbar，这里先关掉弹窗让提示可见
+            onSave = {
+                if (viewModel.isGuest) actionFile = null
+                viewModel.requestSave(file)
+            },
+            // 关弹窗时顺手清掉转存状态，避免下次打开仍停在上次的目录选择
+            onDismiss = {
+                actionFile = null
+                viewModel.dismissSave()
+            },
+            // 转存步骤：与网盘页「移动到」同为弹窗内二级内容，返回箭头回主菜单
+            saveStep = { onBack, onDone ->
+                // 转存成功后 ViewModel 会清空 saveTarget（失败/未登录则保留，让用户重试）
+                LaunchedEffect(viewModel.saveTarget) {
+                    if (viewModel.saveTarget == null) onDone()
+                }
+                when {
+                    viewModel.isSaveXunlei -> XunleiSaveContent(viewModel, xunleiCloudViewModel, onBack)
+                    viewModel.isSaveBaidu -> BaiduSaveContent(viewModel, baiduCloudViewModel, onBack)
+                    viewModel.isSaveC139 -> C139SaveContent(viewModel, c139CloudViewModel, onBack)
+                    viewModel.isSaveUC -> UCSaveContent(viewModel, ucCloudViewModel, onBack)
+                    viewModel.isSavePan123 -> Pan123SaveContent(viewModel, pan123CloudViewModel, onBack)
+                    viewModel.isSavePan115 -> Pan115SaveContent(viewModel, pan115CloudViewModel, onBack)
+                    viewModel.isSaveGuangYa -> GuangYaSaveContent(viewModel, guangyaCloudViewModel, onBack)
+                    else -> SaveToCloudContent(viewModel, quarkCloudViewModel, onBack)
+                }
+            }
+        )
+    }
+}
+
+/**
+ * 游客模式提示条：未登录也能浏览分享列表（7 个网盘的列表接口都允许匿名）。
+ * 夸克/UC 还能直接下载（夸克约 50MB 以内的小文件、UC 不限大小），其余平台下载与 7 平台转存都要登录
+ * —— 见 Agent.md §3.19。
+ */
+@Composable
+private fun GuestBrowseNotice(platform: SharePlatform) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.Info,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(16.dp)
             )
-            viewModel.isSaveBaidu -> BaiduSaveSheet(
-                resolveViewModel = viewModel,
-                cloudViewModel = baiduCloudViewModel,
-                onDismiss = { viewModel.dismissSave() }
-            )
-            viewModel.isSaveC139 -> C139SaveSheet(
-                resolveViewModel = viewModel,
-                cloudViewModel = c139CloudViewModel,
-                onDismiss = { viewModel.dismissSave() }
-            )
-            viewModel.isSaveUC -> UCSaveSheet(
-                resolveViewModel = viewModel,
-                cloudViewModel = ucCloudViewModel,
-                onDismiss = { viewModel.dismissSave() }
-            )
-            viewModel.isSavePan123 -> Pan123SaveSheet(
-                resolveViewModel = viewModel,
-                cloudViewModel = pan123CloudViewModel,
-                onDismiss = { viewModel.dismissSave() }
-            )
-            else -> SaveToCloudSheet(
-                resolveViewModel = viewModel,
-                cloudViewModel = quarkCloudViewModel,
-                onDismiss = { viewModel.dismissSave() }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = when (platform) {
+                    SharePlatform.QUARK ->
+                        "未登录浏览：可直接下载约 50MB 以内的小文件；更大的文件和转存需先到「网盘」页登录"
+                    SharePlatform.UC ->
+                        "未登录浏览：可直接下载（不限大小）；转存需先到「网盘」页登录"
+                    else ->
+                        "未登录浏览：可查看文件列表，下载/转存需先到「网盘」页登录"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
     }
@@ -618,14 +741,12 @@ internal fun CrumbBar(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 internal fun ShareFileRow(
     file: ShareFile,
     onClick: () -> Unit,
-    /** 非空时行尾显示「转存」按钮 */
-    onSave: (() -> Unit)? = null,
-    /** 非空时行尾显示「更多」按钮（打开文件操作菜单） */
+    /** 非空时行尾显示「更多」按钮（打开文件操作弹窗） */
     onMore: (() -> Unit)? = null,
     /** 长按进入多选（多选模式下为 null） */
     onLongClick: (() -> Unit)? = null,
@@ -633,6 +754,10 @@ internal fun ShareFileRow(
     selected: Boolean = false,
     /** 是否显示行首复选框（仅多选模式列表传 true；移动/转存等选择器不显示） */
     showCheckbox: Boolean = false,
+    /** 文件徽章（文件名旁；GitHub Releases 最新/预发布/草稿、账号 repo Fork/语言） */
+    badge: @Composable (() -> Unit)? = null,
+    /** 行形状：网盘页列表组传 listGroupShape(index, count)（首/末项大圆角、中间项小圆角）；默认整行圆角 */
+    shape: Shape = MaterialTheme.shapes.large,
     /** 列表项动画等（调用方传入 Modifier.animateItem()） */
     modifier: Modifier = Modifier
 ) {
@@ -643,7 +768,7 @@ internal fun ShareFileRow(
                 onClick = onClick,
                 onLongClick = onLongClick
             ),
-        shape = MaterialTheme.shapes.large,
+        shape = shape,
         colors = CardDefaults.cardColors(
             containerColor = if (selected) {
                 MaterialTheme.colorScheme.primaryContainer
@@ -698,6 +823,7 @@ internal fun ShareFileRow(
                     maxLines = 1,
                     modifier = Modifier.basicMarquee(iterations = Int.MAX_VALUE)
                 )
+                badge?.invoke()
                 Spacer(modifier = Modifier.height(2.dp))
                 // 副标题行：文件夹/大小 + 修改时间（同一行展示）
                 Text(
@@ -715,9 +841,9 @@ internal fun ShareFileRow(
                     overflow = TextOverflow.Ellipsis
                 )
             }
-            if (onSave != null) {
+            if (onMore != null) {
                 IconButton(
-                    onClick = onSave,
+                    onClick = onMore,
                     modifier = Modifier.size(40.dp)
                 ) {
                     Icon(
