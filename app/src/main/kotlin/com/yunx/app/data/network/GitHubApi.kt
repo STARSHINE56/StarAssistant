@@ -186,7 +186,7 @@ class GitHubApi(
         runCatching {
             val request = Request.Builder()
                 .url("https://api.github.com/user")
-                .header("User-Agent", "YunX")
+                .header("User-Agent", "XingChenAssistant")
                 .header("Accept", "application/vnd.github+json")
                 .header("Authorization", "Bearer $token")
                 .get()
@@ -219,7 +219,7 @@ class GitHubApi(
                     // 1) API readme 接口（原始 Markdown）
                     val apiRequest = Request.Builder()
                         .url("https://api.github.com/repos/$owner/$repo/readme")
-                        .header("User-Agent", "YunX")
+                        .header("User-Agent", "XingChenAssistant")
                         .header("Accept", "application/vnd.github.raw")
                         .get()
                         .also { b ->
@@ -354,7 +354,7 @@ class GitHubApi(
     private fun buildRequest(url: String): Request {
         val builder = Request.Builder()
             .url(url)
-            .header("User-Agent", "YunX")
+            .header("User-Agent", "XingChenAssistant")
             .header("Accept", "application/vnd.github+json")
             .get()
         // Token 非空时携带 Authorization: Bearer（仅提升限额，不打印）
