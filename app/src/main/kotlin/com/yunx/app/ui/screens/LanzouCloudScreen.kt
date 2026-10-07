@@ -29,7 +29,6 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -52,19 +51,14 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.DriveFileMove
-import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -72,7 +66,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarScrollBehavior
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -85,12 +78,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.yunx.app.data.network.model.ShareFile
 import com.yunx.app.ui.items.MultiSelectAction
 import com.yunx.app.ui.items.MultiSelectBar
 import com.yunx.app.ui.components.ScrollToTopButton
@@ -99,8 +90,8 @@ import com.yunx.app.ui.resolve.DownloadLinkDialog
 import com.yunx.app.ui.resolve.BackToParentItem
 import com.yunx.app.ui.resolve.CrumbBar
 import com.yunx.app.ui.resolve.ShareFileRow
-import com.yunx.app.ui.viewmodel.XunleiCloudUiState
-import com.yunx.app.ui.viewmodel.XunleiCloudViewModel
+import com.yunx.app.ui.viewmodel.LanzouCloudUiState
+import com.yunx.app.ui.viewmodel.LanzouCloudViewModel
 import com.yunx.app.ui.theme.effectsDefault
 import com.yunx.app.ui.theme.effectsFast
 import com.yunx.app.ui.theme.ListGroupGap
@@ -109,54 +100,42 @@ import com.yunx.app.ui.theme.spatialDefault
 import com.yunx.app.ui.theme.spatialFast
 
 /**
- * 迅雷网盘云盘浏览页（参考夸克 CloudDriveScreen / UC UCCoudScreen）：
- * - 目录浏览 + 下拉刷新 + 面包屑回退
- * - 长按多选（批量下载/分享/移动/删除）
- * - 文件/文件夹操作菜单（下载/重命名/移动/分享/删除）
- * 认证走 access_token（Bearer）+ 设备指纹 + captcha。
+ * 蓝奏云个人盘浏览页（镜像 123 云盘页）：
+ * 目录浏览 + 下拉刷新 + 长按多选 + 文件操作菜单（下载/重命名/移动/删除/创建分享）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun XunleiCloudScreen(
-    viewModel: XunleiCloudViewModel,
+fun LanzouCloudScreen(
+    viewModel: LanzouCloudViewModel,
     scrollBehavior: TopAppBarScrollBehavior,
     onExit: () -> Unit,
     onDownloadStarted: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    val context = LocalContext.current
     val state by viewModel.uiState.collectAsState()
-    // 系统返回键：多选模式下先退出多选；否则子目录返回上一级，根目录返回账号列表
     BackHandler {
         if (viewModel.multiSelectMode) {
             viewModel.exitMultiSelect()
         } else {
             val s = state
-            if (s is XunleiCloudUiState.Loaded && s.pathNames.isNotEmpty()) viewModel.back() else onExit()
+            if (s is LanzouCloudUiState.Loaded && s.pathNames.isNotEmpty()) viewModel.back() else onExit()
         }
     }
-    // 文件列表滚动状态（返回顶部按钮用）
     val listState = rememberLazyListState()
-    // 搜索过滤（本地过滤当前目录文件）
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var showSearch by rememberSaveable { mutableStateOf(false) }
-    // 各目录滚动位置记忆：进入文件夹/返回时按目录路径恢复，避免返回后列表回到顶部
     val scrollPositions = remember { mutableStateMapOf<String, Int>() }
-    val loadedState = state as? XunleiCloudUiState.Loaded
+    val loadedState = state as? LanzouCloudUiState.Loaded
     val displayFiles = remember(loadedState?.files, searchQuery) {
         val files = loadedState?.files ?: emptyList()
         val q = searchQuery.trim()
         if (q.isEmpty()) files else files.filter { it.fname.contains(q, ignoreCase = true) }
     }
-    val currentDirKey = remember(loadedState?.pathNames) {
-        loadedState?.pathNames?.joinToString("/") ?: ""
-    }
+    val currentDirKey = remember(loadedState?.pathNames) { loadedState?.pathNames?.joinToString("/") ?: "" }
     var showActionSheet by remember { mutableStateOf(false) }
-    // 批量操作弹窗：从多选底部栏直接进入某个步骤（分享/移动）
     var showBatchActions by remember { mutableStateOf(false) }
     var batchInitial by remember { mutableStateOf(BatchStep.MENU) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
-    // 「+」菜单的「创建文件夹」弹窗（「上传文件」项目前是占位，见 CloudAddMenu）
     var showCreateFolder by remember { mutableStateOf(false) }
 
     LaunchedEffect(viewModel.cloudMessage) {
@@ -165,7 +144,6 @@ fun XunleiCloudScreen(
             viewModel.consumeMessage()
         }
     }
-
     LaunchedEffect(viewModel.downloadTriggered) {
         if (viewModel.downloadTriggered > 0) {
             viewModel.consumeDownloadTriggered()
@@ -173,7 +151,6 @@ fun XunleiCloudScreen(
         }
     }
 
-    // 单文件下载确认弹窗（对齐解析页：展示直链，长按可复制）
     viewModel.downloadLink?.let { link ->
         DownloadLinkDialog(
             link = link,
@@ -188,18 +165,16 @@ fun XunleiCloudScreen(
     ) {
         AnimatedContent(
             targetState = state,
-            transitionSpec = {
-                fadeIn(effectsDefault()) togetherWith fadeOut(effectsFast())
-            },
-            label = "xunleiCloudState"
+            transitionSpec = { fadeIn(effectsDefault()) togetherWith fadeOut(effectsFast()) },
+            label = "lanzouCloudState"
         ) { s ->
             when (s) {
-                is XunleiCloudUiState.Loading -> Box(
+                is LanzouCloudUiState.Loading -> Box(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center
                 ) { YunXLoading() }
 
-                is XunleiCloudUiState.Error -> Box(
+                is LanzouCloudUiState.Error -> Box(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center
                 ) {
@@ -219,17 +194,16 @@ fun XunleiCloudScreen(
                     }
                 }
 
-                is XunleiCloudUiState.Loaded -> Box(modifier = Modifier.fillMaxSize()) {
-                // 目录加载完成、列表挂载后恢复该目录上次滚动位置（避免 Loading 阶段误触发）
-                val loadedKey = remember(s.pathNames) { s.pathNames.joinToString("/") }
-                LaunchedEffect(loadedKey) {
-                    listState.scrollToItem(scrollPositions[loadedKey] ?: 0)
-                }
-                PullToRefreshBox(
-                    isRefreshing = viewModel.refreshing,
-                    onRefresh = { viewModel.refresh() },
-                    modifier = Modifier.fillMaxSize()
-                ) {
+                is LanzouCloudUiState.Loaded -> Box(modifier = Modifier.fillMaxSize()) {
+                    val loadedKey = remember(s.pathNames) { s.pathNames.joinToString("/") }
+                    LaunchedEffect(loadedKey) {
+                        listState.scrollToItem(scrollPositions[loadedKey] ?: 0)
+                    }
+                    PullToRefreshBox(
+                        isRefreshing = viewModel.refreshing,
+                        onRefresh = { viewModel.refresh() },
+                        modifier = Modifier.fillMaxSize()
+                    ) {
                         LazyColumn(
                             state = listState,
                             modifier = Modifier
@@ -239,7 +213,6 @@ fun XunleiCloudScreen(
                                 start = 16.dp, end = 16.dp, top = 16.dp,
                                 bottom = if (viewModel.multiSelectMode) 96.dp else 16.dp
                             ),
-                            // 列表组：各项首尾相接（只留 1dp 发丝缝区分行），行圆角按首/中/末分段给
                             verticalArrangement = Arrangement.spacedBy(ListGroupGap)
                         ) {
                             item {
@@ -270,7 +243,7 @@ fun XunleiCloudScreen(
                                             }
                                             Column(modifier = Modifier.weight(1f)) {
                                                 Text(
-                                                    text = "迅雷网盘",
+                                                    text = "蓝奏云",
                                                     style = MaterialTheme.typography.titleMedium,
                                                     fontWeight = FontWeight.Medium,
                                                     maxLines = 1,
@@ -283,25 +256,20 @@ fun XunleiCloudScreen(
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                                 )
                                             }
-                                            // 放大镜：点击展开/收起搜索框
                                             IconButton(onClick = { showSearch = !showSearch }) {
                                                 Icon(
                                                     imageVector = Icons.Outlined.Search,
                                                     contentDescription = if (showSearch) "关闭搜索" else "搜索文件",
-                                                    tint = if (showSearch) {
-                                                        MaterialTheme.colorScheme.primary
-                                                    } else {
-                                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                                    }
+                                                    tint = if (showSearch) MaterialTheme.colorScheme.primary
+                                                    else MaterialTheme.colorScheme.onSurfaceVariant
                                                 )
                                             }
-                                            // 「+」新建菜单（创建文件夹 / 上传文件，Agent.md §3.26）
                                             CloudAddMenu(onCreateFolder = { showCreateFolder = true })
                                         }
                                     }
                                     if (!viewModel.multiSelectMode) {
                                         CrumbBar(
-                                            rootTitle = "迅雷网盘",
+                                            rootTitle = "蓝奏云",
                                             pathNames = s.pathNames,
                                             onNavigate = { level ->
                                                 scrollPositions[currentDirKey] = listState.firstVisibleItemIndex
@@ -309,9 +277,8 @@ fun XunleiCloudScreen(
                                             }
                                         )
                                     }
-                                    // 搜索框（点击放大镜展开；与面包屑保持间距 + 展开/收起动画）
                                     AnimatedVisibility(
-                                    visible = showSearch && !viewModel.multiSelectMode,
+                                        visible = showSearch && !viewModel.multiSelectMode,
                                         enter = expandVertically(spatialDefault()) + fadeIn(effectsDefault()),
                                         exit = shrinkVertically(spatialFast()) + fadeOut(effectsFast())
                                     ) {
@@ -338,12 +305,10 @@ fun XunleiCloudScreen(
                                 }
                             }
 
-                            // 返回上一级（独立于文件列表组，故自带下间距）
                             if (s.pathNames.isNotEmpty()) {
                                 item {
                                     Column(modifier = Modifier.padding(bottom = 8.dp)) {
                                         BackToParentItem(onClick = {
-                                            // 记录当前目录滚动位置，返回上级后恢复上级位置
                                             scrollPositions[currentDirKey] = listState.firstVisibleItemIndex
                                             viewModel.back()
                                         })
@@ -357,9 +322,7 @@ fun XunleiCloudScreen(
                                         text = if (s.files.isEmpty()) "此目录为空" else "未找到匹配「${searchQuery.trim()}」的文件",
                                         style = MaterialTheme.typography.bodyMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(vertical = 32.dp),
+                                        modifier = Modifier.fillMaxWidth().padding(vertical = 32.dp),
                                         textAlign = TextAlign.Center
                                     )
                                 }
@@ -373,7 +336,6 @@ fun XunleiCloudScreen(
                                         if (viewModel.multiSelectMode) {
                                             viewModel.toggleSelect(file)
                                         } else if (file.isdir) {
-                                            // 记录当前目录滚动位置，进入子目录后恢复子目录位置
                                             scrollPositions[currentDirKey] = listState.firstVisibleItemIndex
                                             viewModel.openFolder(file)
                                         } else {
@@ -386,14 +348,10 @@ fun XunleiCloudScreen(
                                             viewModel.openActions(file)
                                             showActionSheet = true
                                         }
-                                    } else {
-                                        null
-                                    },
+                                    } else null,
                                     onLongClick = if (!viewModel.multiSelectMode) {
                                         { viewModel.enterMultiSelect(file) }
-                                    } else {
-                                        null
-                                    },
+                                    } else null,
                                     selected = viewModel.selected.contains(file),
                                     showCheckbox = viewModel.multiSelectMode
                                 )
@@ -401,15 +359,11 @@ fun XunleiCloudScreen(
                         }
                     }
 
-                    // 返回顶部按钮（上滑离开顶部后显示；多选模式下上移避开底部批量栏）
                     ScrollToTopButton(
                         listState = listState,
                         modifier = Modifier
                             .align(Alignment.BottomEnd)
-                            .padding(
-                                end = 16.dp,
-                                bottom = if (viewModel.multiSelectMode) 104.dp else 16.dp
-                            )
+                            .padding(end = 16.dp, bottom = if (viewModel.multiSelectMode) 104.dp else 16.dp)
                     )
 
                     AnimatedVisibility(
@@ -443,8 +397,6 @@ fun XunleiCloudScreen(
         }
     }
 
-    // 文件操作弹窗（单弹窗多步骤：菜单 → 移动/分享/重命名；六大网盘页同一实现）
-    // ★ 删除确认与操作弹窗互斥展示：确认期间不关掉操作弹窗，否则 dismissActions() 会清空 actionFile
     val pendingDeleteTarget = when {
         !showDeleteConfirm -> null
         viewModel.multiSelectMode -> "选中的 ${viewModel.selected.size} 项"
@@ -466,9 +418,7 @@ fun XunleiCloudScreen(
             operating = viewModel.isOperating,
             onDownload = { viewModel.downloadFile() },
             onDownloadFolder = { viewModel.downloadFolder() },
-            // 迅雷分享必须带提取码（可自定义 4 位，留空由服务端生成）
-            passcodeMode = PasscodeMode.REQUIRED_OR_AUTO,
-            onShare = { _, passcode, expiredType -> viewModel.shareFile(expiredType, passcode) },
+            onShare = { _, _, _ -> viewModel.shareFile() },
             onRename = { viewModel.renameFile(it) },
             onConfirmDelete = { viewModel.deleteFile() },
             onDismiss = {
@@ -476,7 +426,7 @@ fun XunleiCloudScreen(
                 viewModel.dismissActions()
             },
             moveStep = { onBack, onDone ->
-                XunleiMoveStep(
+                LanzouMoveStep(
                     subtitle = viewModel.actionFile?.fname ?: "",
                     viewModel = viewModel,
                     onBack = onBack,
@@ -486,14 +436,12 @@ fun XunleiCloudScreen(
         )
     }
 
-    // 批量操作弹窗（多选底部栏的分享/移动/删除）
     if (showBatchActions) {
         BatchActionSheet(
             count = viewModel.selected.size,
             operating = viewModel.isOperating,
             onDownload = { viewModel.downloadSelected() },
-            passcodeMode = PasscodeMode.REQUIRED_OR_AUTO,
-            onShare = { _, passcode, expiredType -> viewModel.shareSelected(expiredType, passcode) },
+            onShare = { _, _, _ -> viewModel.shareSelected() },
             onDelete = {
                 showBatchActions = false
                 showDeleteConfirm = true
@@ -501,7 +449,7 @@ fun XunleiCloudScreen(
             onDismiss = { showBatchActions = false },
             initialStep = batchInitial,
             moveStep = { onBack, onDone ->
-                XunleiMoveStep(
+                LanzouMoveStep(
                     subtitle = "已选 ${viewModel.selected.size} 项",
                     viewModel = viewModel,
                     onBack = onBack,
@@ -511,7 +459,6 @@ fun XunleiCloudScreen(
         )
     }
 
-    // 新建文件夹：名称校验在弹窗内完成，创建请求交给各页 ViewModel
     if (showCreateFolder) {
         CreateFolderDialog(
             onDismiss = { showCreateFolder = false },
@@ -529,7 +476,6 @@ fun XunleiCloudScreen(
         )
     }
 
-// 操作执行中加载弹窗（下载文件夹/批量下载显示进度）
     if (viewModel.isOperating) {
         AlertDialog(
             onDismissRequest = { },
@@ -554,13 +500,12 @@ fun XunleiCloudScreen(
     }
 }
 
-
 /** 移动目录选择弹窗（独立浏览，不影响主列表） */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun XunleiMoveStep(
+private fun LanzouMoveStep(
     subtitle: String,
-    viewModel: XunleiCloudViewModel,
+    viewModel: LanzouCloudViewModel,
     onBack: () -> Unit,
     onDone: () -> Unit
 ) {
@@ -575,32 +520,31 @@ private fun XunleiMoveStep(
         Spacer(modifier = Modifier.height(8.dp))
         CrumbBar(
             rootTitle = "根目录",
-            pathNames = (moveState as? XunleiCloudUiState.Loaded)?.pathNames ?: emptyList(),
+            pathNames = (moveState as? LanzouCloudUiState.Loaded)?.pathNames ?: emptyList(),
             onNavigate = { viewModel.moveNavigateToLevel(it) }
         )
         Spacer(modifier = Modifier.height(8.dp))
-        // 返回上一级：固定在目录区上方（不参与 AnimatedContent 过渡，避免与目录内容交叉叠加）
-        if ((moveState as? XunleiCloudUiState.Loaded)?.pathNames?.isNotEmpty() == true) {
+        if ((moveState as? LanzouCloudUiState.Loaded)?.pathNames?.isNotEmpty() == true) {
             BackToParentItem(onClick = { viewModel.moveBack() })
             Spacer(modifier = Modifier.height(4.dp))
         }
         AnimatedContent(
             targetState = moveState,
             transitionSpec = { fadeIn(effectsDefault()) togetherWith fadeOut(effectsFast()) },
-            label = "xunleiMoveState"
+            label = "lanzouMoveState"
         ) { s ->
             when (s) {
-                is XunleiCloudUiState.Loading -> Box(
+                is LanzouCloudUiState.Loading -> Box(
                     modifier = Modifier.fillMaxWidth().height(180.dp),
                     contentAlignment = Alignment.Center
                 ) { YunXLoading() }
 
-                is XunleiCloudUiState.Error -> Box(
+                is LanzouCloudUiState.Error -> Box(
                     modifier = Modifier.fillMaxWidth().height(140.dp),
                     contentAlignment = Alignment.Center
                 ) { Text(s.message, color = MaterialTheme.colorScheme.onSurfaceVariant) }
 
-                is XunleiCloudUiState.Loaded -> {
+                is LanzouCloudUiState.Loaded -> {
                     val dirs = s.files.filter { it.isdir }
                     if (dirs.isEmpty()) {
                         Box(
@@ -617,7 +561,6 @@ private fun XunleiMoveStep(
                     } else {
                         LazyColumn(
                             modifier = Modifier.fillMaxWidth().heightIn(max = 240.dp),
-                            // 目录列表同样拼成一组
                             verticalArrangement = Arrangement.spacedBy(ListGroupGap)
                         ) {
                             itemsIndexed(dirs, key = { _, d -> d.fid }) { index, dir ->
@@ -633,10 +576,10 @@ private fun XunleiMoveStep(
             }
         }
         Spacer(modifier = Modifier.height(16.dp))
-        val dirName = (moveState as? XunleiCloudUiState.Loaded)?.pathNames?.lastOrNull() ?: "根目录"
+        val dirName = (moveState as? LanzouCloudUiState.Loaded)?.pathNames?.lastOrNull() ?: "根目录"
         Button(
             onClick = {
-                val to = (moveState as? XunleiCloudUiState.Loaded)?.dirFid ?: "0"
+                val to = (moveState as? LanzouCloudUiState.Loaded)?.dirId ?: "-1"
                 if (viewModel.multiSelectMode) viewModel.moveSelected(to) else viewModel.moveFile(to)
                 onDone()
             },

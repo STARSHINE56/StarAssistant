@@ -74,6 +74,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarScrollBehavior
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -105,6 +106,10 @@ import com.yunx.app.ui.viewmodel.C139CloudViewModel
 import com.yunx.app.ui.viewmodel.Pan123CloudViewModel
 import com.yunx.app.ui.viewmodel.QuarkCloudViewModel
 import com.yunx.app.ui.viewmodel.ResolveUiState
+import com.yunx.app.ui.viewmodel.Pan115CloudViewModel
+import com.yunx.app.ui.viewmodel.GuangYaCloudViewModel
+import com.yunx.app.data.network.GitHubLinkParser
+import com.yunx.app.ui.viewmodel.BookmarkViewModel
 import com.yunx.app.ui.viewmodel.ResolveViewModel
 import com.yunx.app.ui.viewmodel.UCCoudViewModel
 import com.yunx.app.ui.viewmodel.XunleiCloudViewModel
@@ -136,9 +141,14 @@ fun ResolveScreen(
 
     /** 123 云盘浏览 ViewModel */
     pan123CloudViewModel: Pan123CloudViewModel,
+    pan115CloudViewModel: Pan115CloudViewModel,
+    guangyaCloudViewModel: GuangYaCloudViewModel,
 
+    bookmarkViewModel: BookmarkViewModel,
+    onOpenBookmarks: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val homeBookmarks by bookmarkViewModel.homeBookmarks.collectAsState()
     val state = viewModel.uiState
     val downloadLink = viewModel.downloadLink
     val downloadError = viewModel.downloadError
@@ -180,10 +190,9 @@ fun ResolveScreen(
                 )
         }
 
-        viewModel.startResolve(
-            rawLink,
-            password
-        )
+        val github = GitHubLinkParser.parse(rawLink)
+        if (github != null) viewModel.startGitHubResolve(github)
+        else viewModel.startResolve(rawLink, password)
     }
 
     // -----------------------------
@@ -231,12 +240,13 @@ fun ResolveScreen(
             readClipboardSafely(context)
 
         if (
+            com.yunx.app.ui.theme.ThemeController.clipboardSuggestEnabled &&
             text != null &&
             state is ResolveUiState.Idle &&
             text.isNotBlank() &&
             text != link &&
             text != ignoredClipboard &&
-            ShareLinkParser.parse(text) != null
+            (ShareLinkParser.parse(text) != null || GitHubLinkParser.parse(text) != null)
         ) {
             clipboardSuggestion = text
         }
@@ -400,6 +410,13 @@ fun ResolveScreen(
                         pan123CloudViewModel =
                             pan123CloudViewModel,
 
+                        pan115CloudViewModel = pan115CloudViewModel,
+                        guangyaCloudViewModel = guangyaCloudViewModel,
+                        extraHeaderContent = if (viewModel.isGitHubPlatform) { { GitHubResolveHeader(viewModel) } } else null,
+                        extraFooterContent = if (viewModel.githubAtRepoRoot) { { GitHubReadme(viewModel) } } else null,
+                        fileBadge = if (viewModel.isGitHubPlatform) { { file -> viewModel.githubBadges[file.fid]?.let { Text(it) } } } else null,
+                        onRefresh = if (viewModel.isGitHubPlatform) { { viewModel.refreshGitHubCurrentNode() } } else null,
+                        refreshing = viewModel.githubRefreshing,
                         scrollBehavior =
                             scrollBehavior,
 
@@ -476,7 +493,7 @@ fun ResolveScreen(
                                         clipboardText
                                     )
 
-                                if (parsed == null) {
+                                if (parsed == null && GitHubLinkParser.parse(clipboardText) == null) {
                                     SnackbarController.show(
                                         "未检测到支持的分享链接"
                                     )
@@ -485,7 +502,7 @@ fun ResolveScreen(
                                         clipboardText
 
                                     pwd =
-                                        parsed.pwd
+                                        parsed?.pwd
                                             .orEmpty()
 
                                     pwdEdited = true
@@ -497,7 +514,7 @@ fun ResolveScreen(
                                         clipboardText
 
                                     SnackbarController.show(
-                                        "已识别${platformLabel(parsed.platform)}分享链接"
+                                        "已识别${parsed?.let { platformLabel(it.platform) } ?: "GitHub"}链接"
                                     )
                                 }
                             }
@@ -541,6 +558,13 @@ fun ResolveScreen(
 
 
 
+                        homeBookmarks = homeBookmarks,
+                        onOpenBookmarks = onOpenBookmarks,
+                        onOpenShortcut = { b ->
+                            link = b.link; pwd = b.pwd; pwdEdited = true
+                            resolveAndRemember(b.link, b.pwd)
+                        },
+                        onRemoveShortcut = { b -> bookmarkViewModel.setHomePinned(b.id, false) },
                         onClearHistory = {
                             historyRepository.clear()
 
@@ -799,7 +823,11 @@ private fun ResolveInputContent(
 
     onShowAllHistory: () -> Unit,
 
-    onClearHistory: () -> Unit
+    onClearHistory: () -> Unit,
+    homeBookmarks: List<com.yunx.app.data.db.BookmarkEntity>,
+    onOpenBookmarks: () -> Unit,
+    onOpenShortcut: (com.yunx.app.data.db.BookmarkEntity) -> Unit,
+    onRemoveShortcut: (com.yunx.app.data.db.BookmarkEntity) -> Unit
 ) {
     val isLoading =
         state is ResolveUiState.Loading
@@ -1394,6 +1422,7 @@ private fun ResolveInputContent(
                     8.dp
                 )
         )
+        HomeShortcutsSection(homeBookmarks, onOpenShortcut, onOpenBookmarks, onRemoveShortcut)
     }
 }
 
@@ -2281,8 +2310,12 @@ private fun platformLabel(
         SharePlatform.C139 ->
             "移动云盘"
 
-        SharePlatform.PAN123 ->
-            "123 云盘"
+        SharePlatform.PAN123 -> "123 云盘"
+        SharePlatform.PAN115 -> "115 网盘"
+        SharePlatform.GUANGYA -> "光鸭云盘"
+        SharePlatform.ILANZOU -> "蓝奏云优享版"
+        SharePlatform.LANZOU -> "蓝奏云"
+        SharePlatform.GITHUB -> "GitHub"
     }
 
 /**

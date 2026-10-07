@@ -113,6 +113,7 @@ fun SettingsScreen(
     onAboutClick: () -> Unit,
     onSupportClick: () -> Unit,
     backupManager: AuthBackupManager,
+    onGopeedClick: () -> Unit = {},
     // 保留此参数以兼容 MainScreen 中现有的调用。
     onDownloadUpdateApk: (url: String, fileName: String) -> Unit,
     modifier: Modifier = Modifier
@@ -150,7 +151,12 @@ fun SettingsScreen(
             ThreadPlatform(
                 DownloadPlatform.PAN123,
                 "123 云盘"
-            )
+            ),
+            ThreadPlatform(DownloadPlatform.PAN115, "115 网盘"),
+            ThreadPlatform(DownloadPlatform.GUANGYA, "光鸭云盘"),
+            ThreadPlatform(DownloadPlatform.ILANZOU, "蓝奏云优享版"),
+            ThreadPlatform(DownloadPlatform.LANZOU, "蓝奏云"),
+            ThreadPlatform(DownloadPlatform.GITHUB, "GitHub")
         )
     }
 
@@ -276,7 +282,7 @@ fun SettingsScreen(
                     } else {
                         val count = runCatching {
                             withContext(Dispatchers.IO) {
-                                backupManager.importJson(text)
+                                backupManager.importJson(text, context)
                             }
                         }.getOrElse { e ->
                             SnackbarController.show(
@@ -306,6 +312,7 @@ fun SettingsScreen(
             .padding(16.dp)
     ) {
         SectionLabel("下载")
+        SyncedFeaturesSettings(onGopeedClick)
 
         SettingsItem(
             icon = Icons.Outlined.Tune,
@@ -859,7 +866,7 @@ fun SettingsScreen(
                             withContext(Dispatchers.IO) {
                                 backupManager.export(
                                     password,
-                                    onlyLoggedIn
+                                    onlyLoggedIn, context
                                 )
                             }
                         }.getOrNull()
@@ -916,7 +923,7 @@ fun SettingsScreen(
                                 withContext(Dispatchers.IO) {
                                     backupManager.import(
                                         content,
-                                        password
+                                        password, context
                                     )
                                 }
                             } catch (

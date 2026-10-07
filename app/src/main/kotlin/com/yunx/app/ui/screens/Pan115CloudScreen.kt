@@ -90,6 +90,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.yunx.app.data.network.Pan115Constants
+import com.yunx.app.data.network.model.ShareExpire
 import com.yunx.app.data.network.model.ShareFile
 import com.yunx.app.ui.items.MultiSelectAction
 import com.yunx.app.ui.items.MultiSelectBar
@@ -99,8 +101,8 @@ import com.yunx.app.ui.resolve.DownloadLinkDialog
 import com.yunx.app.ui.resolve.BackToParentItem
 import com.yunx.app.ui.resolve.CrumbBar
 import com.yunx.app.ui.resolve.ShareFileRow
-import com.yunx.app.ui.viewmodel.XunleiCloudUiState
-import com.yunx.app.ui.viewmodel.XunleiCloudViewModel
+import com.yunx.app.ui.viewmodel.Pan115CloudUiState
+import com.yunx.app.ui.viewmodel.Pan115CloudViewModel
 import com.yunx.app.ui.theme.effectsDefault
 import com.yunx.app.ui.theme.effectsFast
 import com.yunx.app.ui.theme.ListGroupGap
@@ -109,16 +111,18 @@ import com.yunx.app.ui.theme.spatialDefault
 import com.yunx.app.ui.theme.spatialFast
 
 /**
- * 迅雷网盘云盘浏览页（参考夸克 CloudDriveScreen / UC UCCoudScreen）：
+ * 115 网盘云盘浏览页（参考 123/移动云盘页）：
  * - 目录浏览 + 下拉刷新 + 面包屑回退
  * - 长按多选（批量下载/分享/移动/删除）
  * - 文件/文件夹操作菜单（下载/重命名/移动/分享/删除）
- * 认证走 access_token（Bearer）+ 设备指纹 + captcha。
+ * 认证走整串登录 Cookie（[com.yunx.app.data.db.Pan115AccountEntity.cookie]），目录 ID 用 cid（根="0"）；
+ * 分享有效期是 115 专属档位（`ShareExpire.PAN115_OPTIONS`：长期/1/3/7/15 天），
+ * 访问码由服务端生成、不可自定义（与 139 同规则），故提取码步骤传 `PasscodeMode.SERVER_GENERATED`。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun XunleiCloudScreen(
-    viewModel: XunleiCloudViewModel,
+fun Pan115CloudScreen(
+    viewModel: Pan115CloudViewModel,
     scrollBehavior: TopAppBarScrollBehavior,
     onExit: () -> Unit,
     onDownloadStarted: () -> Unit = {},
@@ -132,7 +136,7 @@ fun XunleiCloudScreen(
             viewModel.exitMultiSelect()
         } else {
             val s = state
-            if (s is XunleiCloudUiState.Loaded && s.pathNames.isNotEmpty()) viewModel.back() else onExit()
+            if (s is Pan115CloudUiState.Loaded && s.pathNames.isNotEmpty()) viewModel.back() else onExit()
         }
     }
     // 文件列表滚动状态（返回顶部按钮用）
@@ -142,7 +146,7 @@ fun XunleiCloudScreen(
     var showSearch by rememberSaveable { mutableStateOf(false) }
     // 各目录滚动位置记忆：进入文件夹/返回时按目录路径恢复，避免返回后列表回到顶部
     val scrollPositions = remember { mutableStateMapOf<String, Int>() }
-    val loadedState = state as? XunleiCloudUiState.Loaded
+    val loadedState = state as? Pan115CloudUiState.Loaded
     val displayFiles = remember(loadedState?.files, searchQuery) {
         val files = loadedState?.files ?: emptyList()
         val q = searchQuery.trim()
@@ -191,15 +195,15 @@ fun XunleiCloudScreen(
             transitionSpec = {
                 fadeIn(effectsDefault()) togetherWith fadeOut(effectsFast())
             },
-            label = "xunleiCloudState"
+            label = "pan115CloudState"
         ) { s ->
             when (s) {
-                is XunleiCloudUiState.Loading -> Box(
+                is Pan115CloudUiState.Loading -> Box(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center
                 ) { YunXLoading() }
 
-                is XunleiCloudUiState.Error -> Box(
+                is Pan115CloudUiState.Error -> Box(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center
                 ) {
@@ -219,17 +223,17 @@ fun XunleiCloudScreen(
                     }
                 }
 
-                is XunleiCloudUiState.Loaded -> Box(modifier = Modifier.fillMaxSize()) {
-                // 目录加载完成、列表挂载后恢复该目录上次滚动位置（避免 Loading 阶段误触发）
-                val loadedKey = remember(s.pathNames) { s.pathNames.joinToString("/") }
-                LaunchedEffect(loadedKey) {
-                    listState.scrollToItem(scrollPositions[loadedKey] ?: 0)
-                }
-                PullToRefreshBox(
-                    isRefreshing = viewModel.refreshing,
-                    onRefresh = { viewModel.refresh() },
-                    modifier = Modifier.fillMaxSize()
-                ) {
+                is Pan115CloudUiState.Loaded -> Box(modifier = Modifier.fillMaxSize()) {
+                    // 目录加载完成、列表挂载后恢复该目录上次滚动位置（避免 Loading 阶段误触发）
+                    val loadedKey = remember(s.pathNames) { s.pathNames.joinToString("/") }
+                    LaunchedEffect(loadedKey) {
+                        listState.scrollToItem(scrollPositions[loadedKey] ?: 0)
+                    }
+                    PullToRefreshBox(
+                        isRefreshing = viewModel.refreshing,
+                        onRefresh = { viewModel.refresh() },
+                        modifier = Modifier.fillMaxSize()
+                    ) {
                         LazyColumn(
                             state = listState,
                             modifier = Modifier
@@ -270,7 +274,7 @@ fun XunleiCloudScreen(
                                             }
                                             Column(modifier = Modifier.weight(1f)) {
                                                 Text(
-                                                    text = "迅雷网盘",
+                                                    text = "115网盘",
                                                     style = MaterialTheme.typography.titleMedium,
                                                     fontWeight = FontWeight.Medium,
                                                     maxLines = 1,
@@ -301,7 +305,7 @@ fun XunleiCloudScreen(
                                     }
                                     if (!viewModel.multiSelectMode) {
                                         CrumbBar(
-                                            rootTitle = "迅雷网盘",
+                                            rootTitle = "115网盘",
                                             pathNames = s.pathNames,
                                             onNavigate = { level ->
                                                 scrollPositions[currentDirKey] = listState.firstVisibleItemIndex
@@ -311,7 +315,7 @@ fun XunleiCloudScreen(
                                     }
                                     // 搜索框（点击放大镜展开；与面包屑保持间距 + 展开/收起动画）
                                     AnimatedVisibility(
-                                    visible = showSearch && !viewModel.multiSelectMode,
+                                        visible = showSearch && !viewModel.multiSelectMode,
                                         enter = expandVertically(spatialDefault()) + fadeIn(effectsDefault()),
                                         exit = shrinkVertically(spatialFast()) + fadeOut(effectsFast())
                                     ) {
@@ -466,17 +470,18 @@ fun XunleiCloudScreen(
             operating = viewModel.isOperating,
             onDownload = { viewModel.downloadFile() },
             onDownloadFolder = { viewModel.downloadFolder() },
-            // 迅雷分享必须带提取码（可自定义 4 位，留空由服务端生成）
-            passcodeMode = PasscodeMode.REQUIRED_OR_AUTO,
-            onShare = { _, passcode, expiredType -> viewModel.shareFile(expiredType, passcode) },
+            // 115 的访问码由服务端生成（不可自定义/取消），有效期是 115 专属档位
+            onShare = { _, _, expiredType -> viewModel.shareFile(expiredType) },
             onRename = { viewModel.renameFile(it) },
             onConfirmDelete = { viewModel.deleteFile() },
             onDismiss = {
                 showActionSheet = false
                 viewModel.dismissActions()
             },
+            passcodeMode = PasscodeMode.SERVER_GENERATED,
+            expireOptions = ShareExpire.PAN115_OPTIONS,
             moveStep = { onBack, onDone ->
-                XunleiMoveStep(
+                Pan115MoveStep(
                     subtitle = viewModel.actionFile?.fname ?: "",
                     viewModel = viewModel,
                     onBack = onBack,
@@ -492,16 +497,17 @@ fun XunleiCloudScreen(
             count = viewModel.selected.size,
             operating = viewModel.isOperating,
             onDownload = { viewModel.downloadSelected() },
-            passcodeMode = PasscodeMode.REQUIRED_OR_AUTO,
-            onShare = { _, passcode, expiredType -> viewModel.shareSelected(expiredType, passcode) },
+            onShare = { _, _, expiredType -> viewModel.shareSelected(expiredType) },
             onDelete = {
                 showBatchActions = false
                 showDeleteConfirm = true
             },
             onDismiss = { showBatchActions = false },
+            passcodeMode = PasscodeMode.SERVER_GENERATED,
+            expireOptions = ShareExpire.PAN115_OPTIONS,
             initialStep = batchInitial,
             moveStep = { onBack, onDone ->
-                XunleiMoveStep(
+                Pan115MoveStep(
                     subtitle = "已选 ${viewModel.selected.size} 项",
                     viewModel = viewModel,
                     onBack = onBack,
@@ -529,7 +535,7 @@ fun XunleiCloudScreen(
         )
     }
 
-// 操作执行中加载弹窗（下载文件夹/批量下载显示进度）
+    // 操作执行中加载弹窗（下载文件夹/批量下载显示进度）
     if (viewModel.isOperating) {
         AlertDialog(
             onDismissRequest = { },
@@ -554,13 +560,12 @@ fun XunleiCloudScreen(
     }
 }
 
-
 /** 移动目录选择弹窗（独立浏览，不影响主列表） */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun XunleiMoveStep(
+private fun Pan115MoveStep(
     subtitle: String,
-    viewModel: XunleiCloudViewModel,
+    viewModel: Pan115CloudViewModel,
     onBack: () -> Unit,
     onDone: () -> Unit
 ) {
@@ -575,32 +580,31 @@ private fun XunleiMoveStep(
         Spacer(modifier = Modifier.height(8.dp))
         CrumbBar(
             rootTitle = "根目录",
-            pathNames = (moveState as? XunleiCloudUiState.Loaded)?.pathNames ?: emptyList(),
+            pathNames = (moveState as? Pan115CloudUiState.Loaded)?.pathNames ?: emptyList(),
             onNavigate = { viewModel.moveNavigateToLevel(it) }
         )
         Spacer(modifier = Modifier.height(8.dp))
-        // 返回上一级：固定在目录区上方（不参与 AnimatedContent 过渡，避免与目录内容交叉叠加）
-        if ((moveState as? XunleiCloudUiState.Loaded)?.pathNames?.isNotEmpty() == true) {
+        if ((moveState as? Pan115CloudUiState.Loaded)?.pathNames?.isNotEmpty() == true) {
             BackToParentItem(onClick = { viewModel.moveBack() })
             Spacer(modifier = Modifier.height(4.dp))
         }
         AnimatedContent(
             targetState = moveState,
             transitionSpec = { fadeIn(effectsDefault()) togetherWith fadeOut(effectsFast()) },
-            label = "xunleiMoveState"
+            label = "pan115MoveState"
         ) { s ->
             when (s) {
-                is XunleiCloudUiState.Loading -> Box(
+                is Pan115CloudUiState.Loading -> Box(
                     modifier = Modifier.fillMaxWidth().height(180.dp),
                     contentAlignment = Alignment.Center
                 ) { YunXLoading() }
 
-                is XunleiCloudUiState.Error -> Box(
+                is Pan115CloudUiState.Error -> Box(
                     modifier = Modifier.fillMaxWidth().height(140.dp),
                     contentAlignment = Alignment.Center
                 ) { Text(s.message, color = MaterialTheme.colorScheme.onSurfaceVariant) }
 
-                is XunleiCloudUiState.Loaded -> {
+                is Pan115CloudUiState.Loaded -> {
                     val dirs = s.files.filter { it.isdir }
                     if (dirs.isEmpty()) {
                         Box(
@@ -633,10 +637,10 @@ private fun XunleiMoveStep(
             }
         }
         Spacer(modifier = Modifier.height(16.dp))
-        val dirName = (moveState as? XunleiCloudUiState.Loaded)?.pathNames?.lastOrNull() ?: "根目录"
+        val dirName = (moveState as? Pan115CloudUiState.Loaded)?.pathNames?.lastOrNull() ?: "根目录"
         Button(
             onClick = {
-                val to = (moveState as? XunleiCloudUiState.Loaded)?.dirFid ?: "0"
+                val to = (moveState as? Pan115CloudUiState.Loaded)?.dirId ?: Pan115Constants.ROOT_CID
                 if (viewModel.multiSelectMode) viewModel.moveSelected(to) else viewModel.moveFile(to)
                 onDone()
             },

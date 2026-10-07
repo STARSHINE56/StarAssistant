@@ -23,7 +23,6 @@ import android.content.ClipboardManager
 import android.content.Context
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -52,11 +51,15 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.AddToHomeScreen
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Link
+import androidx.compose.material.icons.outlined.RemoveCircleOutline
+import androidx.compose.material.icons.outlined.TextFields
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -94,6 +97,10 @@ import com.yunx.app.data.db.BookmarkEntity
 import com.yunx.app.data.network.ShareLinkParser
 import com.yunx.app.ui.rememberGlobalSnackbarHostState
 import com.yunx.app.ui.viewmodel.BookmarkViewModel
+import com.yunx.app.ui.theme.effectsDefault
+import com.yunx.app.ui.theme.effectsFast
+import com.yunx.app.ui.theme.spatialDefault
+import com.yunx.app.ui.theme.spatialFast
 
 /** 「自定义分类」虚拟选项标识（不参与持久化，仅用于弹窗交互） */
 private const val CUSTOM_CATEGORY = "__custom__"
@@ -122,6 +129,8 @@ fun BookmarkScreen(
     var showAddDialog by remember { mutableStateOf(false) }
     var editingBookmark by remember { mutableStateOf<BookmarkEntity?>(null) }
     var menuBookmark by remember { mutableStateOf<BookmarkEntity?>(null) }
+    // 自定义主页快捷方式色块文字（仅主页快捷方式用得到）
+    var labelBookmark by remember { mutableStateOf<BookmarkEntity?>(null) }
 
     val filtered = remember(bookmarks, selectedCategory) {
         val cat = selectedCategory
@@ -191,10 +200,13 @@ fun BookmarkScreen(
             onConfirm = { link, title, category, pwd ->
                 showAddDialog = false
                 val parsed = ShareLinkParser.parse(link)
+                // GitHub 链接 ShareLinkParser 不识别，单独取平台标签
+                val platform = parsed?.platform?.name
+                    ?: if (com.yunx.app.data.network.GitHubLinkParser.parse(link) != null) "GITHUB" else ""
                 viewModel.addBookmark(
                     link = link,
                     title = title,
-                    platform = parsed?.platform?.name.orEmpty(),
+                    platform = platform,
                     pwd = pwd.ifBlank { parsed?.pwd.orEmpty() },
                     category = category
                 )
@@ -233,11 +245,33 @@ fun BookmarkScreen(
                 menuBookmark = null
                 editingBookmark = bookmark
             },
+            onToggleHome = {
+                // 先关弹窗再切状态，避免菜单停留在旧状态上
+                val pinned = bookmark.homePinned
+                menuBookmark = null
+                viewModel.setHomePinned(bookmark.id, !pinned)
+            },
+            onEditLabel = {
+                menuBookmark = null
+                labelBookmark = bookmark
+            },
             onDelete = {
                 menuBookmark = null
                 viewModel.delete(bookmark.id)
             },
             onDismiss = { menuBookmark = null }
+        )
+    }
+
+    // 自定义主页快捷方式色块文字
+    labelBookmark?.let { bookmark ->
+        HomeLabelDialog(
+            bookmark = bookmark,
+            onConfirm = { label ->
+                viewModel.setHomeLabel(bookmark.id, label)
+                labelBookmark = null
+            },
+            onDismiss = { labelBookmark = null }
         )
     }
 }
@@ -314,6 +348,31 @@ private fun BookmarkRow(
                         color = MaterialTheme.colorScheme.onSecondaryContainer,
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                     )
+                }
+                if (bookmark.homePinned) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = MaterialTheme.colorScheme.tertiaryContainer
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Home,
+                                contentDescription = null,
+                                modifier = Modifier.size(12.dp),
+                                tint = MaterialTheme.colorScheme.onTertiaryContainer
+                            )
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text(
+                                text = "主页",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer
+                            )
+                        }
+                    }
                 }
             }
             Spacer(modifier = Modifier.height(8.dp))
@@ -464,8 +523,8 @@ private fun AddBookmarkDialog(
                 // 选择「自定义」时才展开输入框（与解析页「添加至收藏」交互一致，带动画）
                 AnimatedVisibility(
                     visible = isCustom,
-                    enter = expandVertically(tween(200)) + fadeIn(tween(200)),
-                    exit = shrinkVertically(tween(200)) + fadeOut(tween(150))
+                    enter = expandVertically(spatialDefault()) + fadeIn(effectsDefault()),
+                    exit = shrinkVertically(spatialFast()) + fadeOut(effectsFast())
                 ) {
                     OutlinedTextField(
                         value = customCategory,
@@ -556,8 +615,8 @@ internal fun AddToBookmarkDialog(
                 }
                 AnimatedVisibility(
                     visible = isCustom,
-                    enter = expandVertically(tween(200)) + fadeIn(tween(200)),
-                    exit = shrinkVertically(tween(200)) + fadeOut(tween(150))
+                    enter = expandVertically(spatialDefault()) + fadeIn(effectsDefault()),
+                    exit = shrinkVertically(spatialFast()) + fadeOut(effectsFast())
                 ) {
                     OutlinedTextField(
                         value = customCategory,
@@ -641,8 +700,8 @@ private fun EditCategoryDialog(
                 // 选择「自定义」时才展开输入框（与添加收藏弹窗交互一致，带动画）
                 AnimatedVisibility(
                     visible = isCustom,
-                    enter = expandVertically(tween(200)) + fadeIn(tween(200)),
-                    exit = shrinkVertically(tween(200)) + fadeOut(tween(150))
+                    enter = expandVertically(spatialDefault()) + fadeIn(effectsDefault()),
+                    exit = shrinkVertically(spatialFast()) + fadeOut(effectsFast())
                 ) {
                     OutlinedTextField(
                         value = customCategory,
@@ -676,6 +735,8 @@ private fun BookmarkMenuDialog(
     onResolve: () -> Unit,
     onCopy: () -> Unit,
     onEditCategory: () -> Unit,
+    onToggleHome: () -> Unit,
+    onEditLabel: () -> Unit,
     onDelete: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -705,6 +766,31 @@ private fun BookmarkMenuDialog(
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("修改分类")
                 }
+                TextButton(onClick = onToggleHome, modifier = Modifier.fillMaxWidth()) {
+                    Icon(
+                        imageVector = if (bookmark.homePinned) {
+                            Icons.Outlined.RemoveCircleOutline
+                        } else {
+                            Icons.Outlined.AddToHomeScreen
+                        },
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(if (bookmark.homePinned) "从主页移除" else "添加到主页")
+                }
+                // 色块文字只有主页快捷方式用得到，所以只在已添加时给入口
+                if (bookmark.homePinned) {
+                    TextButton(onClick = onEditLabel, modifier = Modifier.fillMaxWidth()) {
+                        Icon(
+                            Icons.Outlined.TextFields,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("自定义图标文字")
+                    }
+                }
                 TextButton(onClick = onDelete, modifier = Modifier.fillMaxWidth()) {
                     Icon(
                         Icons.Outlined.Delete,
@@ -724,6 +810,46 @@ private fun BookmarkMenuDialog(
     )
 }
 
+/** 自定义主页快捷方式色块文字（留空 = 恢复自动取标题前几个字） */
+@Composable
+private fun HomeLabelDialog(
+    bookmark: BookmarkEntity,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var text by remember(bookmark.id) { mutableStateOf(bookmark.homeLabel) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("自定义图标文字") },
+        text = {
+            Column {
+                Text(
+                    text = "显示在主页快捷方式色块里的文字，最多 $HOME_LABEL_MAX_LENGTH 个字。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = text,
+                    // 直接截断而不是报错：粘贴长文本时给出最短路径
+                    onValueChange = { if (it.length <= HOME_LABEL_MAX_LENGTH) text = it },
+                    singleLine = true,
+                    label = { Text("色块文字") },
+                    placeholder = { Text(homeTileLabel(bookmark)) },
+                    supportingText = { Text("留空则自动取标题前 $HOME_LABEL_MAX_LENGTH 个字") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(text) }) { Text("保存") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
+}
+
 /** 平台枚举名 → 展示名 */
 internal fun bookmarkPlatformLabel(platform: String): String = when (platform) {
     "QUARK" -> "夸克网盘"
@@ -732,6 +858,7 @@ internal fun bookmarkPlatformLabel(platform: String): String = when (platform) {
     "BAIDU" -> "百度网盘"
     "C139" -> "移动云盘"
     "PAN123" -> "123 云盘"
+    "PAN115" -> "115网盘"
     else -> "网盘"
 }
 
