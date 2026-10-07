@@ -28,7 +28,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -50,6 +49,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.yunx.app.data.network.QuarkConstants
 import com.yunx.app.ui.viewmodel.QuarkAccountViewModel
+import com.yunx.app.ui.components.YunXWavyLoading
+import com.yunx.app.util.DiagnosticLog
 import kotlinx.coroutines.launch
 
 /**
@@ -92,12 +93,14 @@ fun QuarkLoginScreen(
             settings.loadWithOverviewMode = true
 
             settings.userAgentString = QuarkConstants.USER_AGENT
-            webViewClient = object : WebViewClient() {
+            webViewClient = object : DiagnosticWebViewClient() {
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                    DiagnosticLog.webview("page_started", url)
                     isLoading = true
                 }
 
                 override fun onPageFinished(view: WebView?, url: String?) {
+                    DiagnosticLog.webview("page_finished", url)
                     isLoading = false
                 }
             }
@@ -184,7 +187,7 @@ fun QuarkLoginScreen(
                 modifier = Modifier.fillMaxSize()
             )
             if (isLoading) {
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                YunXWavyLoading(modifier = Modifier.fillMaxWidth())
             }
         }
     }
