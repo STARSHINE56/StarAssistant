@@ -59,6 +59,15 @@ import java.util.zip.ZipInputStream
  * 排查：全链路打点，logcat 过滤 GopeedEngine（失败路径一律 Log.e 并附带排查提示）。
  */
 object GopeedEngine {
+    /** Native done state alone is insufficient after a crash or external file deletion. */
+    internal fun completedOutputError(file: File, expectedSize: Long, folder: Boolean): String? = when {
+        !file.exists() -> "Gopeed 任务已结束，但本地文件不存在，请重新下载"
+        folder && !file.isDirectory -> "Gopeed 下载目录无效"
+        !folder && !file.isFile -> "Gopeed 下载文件无效"
+        !folder && expectedSize > 0 && file.length() != expectedSize -> "Gopeed 下载文件大小不符，请重新下载"
+        else -> null
+    }
+
 
     /** 引擎状态：未导入 / 已导入未启动 / 运行中 */
     enum class State { NOT_INSTALLED, INSTALLED, RUNNING }
