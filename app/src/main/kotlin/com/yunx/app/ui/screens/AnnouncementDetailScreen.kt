@@ -69,6 +69,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.mikepenz.markdown.m3.Markdown
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.UriHandler
+import com.yunx.app.data.update.UpdateChecker
+import com.yunx.app.ui.SnackbarController
 import com.yunx.app.data.announcement.AnnouncementApi
 import com.yunx.app.data.announcement.formatLocalDateTime
 import com.yunx.app.data.announcement.parseIsoMillis
@@ -275,11 +280,17 @@ private fun AnnouncementDetailContent(
                     )
                 }
             } else {
-                Markdown(
-                    content = content,
-                    typography = typography,
-                    imageTransformer = GitHubMarkdownImageTransformer
-                )
+                val browser = LocalUriHandler.current
+                CompositionLocalProvider(LocalUriHandler provides object : UriHandler {
+                    override fun openUri(uri: String) {
+                        val web = UpdateChecker.safeWebUrl(uri)
+                        if (web != null) runCatching { browser.openUri(web) }
+                            .onFailure { SnackbarController.show("无法打开网页链接") }
+                        else SnackbarController.show("公告仅支持打开网页链接")
+                    }
+                }) {
+                    Markdown(content = content, typography = typography, imageTransformer = GitHubMarkdownImageTransformer)
+                }
             }
         }
 

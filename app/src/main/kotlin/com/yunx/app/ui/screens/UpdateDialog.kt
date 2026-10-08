@@ -78,7 +78,7 @@ fun UpdateDialog(
                 )
 
                 Text(
-                    text = "发现新版本",
+                    text = release.title,
                     style = MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.SemiBold
                 )
@@ -109,9 +109,11 @@ fun UpdateDialog(
                     )
                 }
 
-                Spacer(
-                    modifier = Modifier.height(22.dp)
-                )
+                if (release.publishedAt.isNotBlank()) {
+                    Text("发布日期：${release.publishedAt.take(10)}", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Spacer(modifier = Modifier.height(22.dp))
 
                 Column(
                     modifier = Modifier.fillMaxWidth()
@@ -157,7 +159,7 @@ fun UpdateDialog(
                     modifier = Modifier.height(20.dp)
                 )
 
-                Button(
+                if (UpdateChecker.hasDownload(release)) Button(
                     onClick = onDownload,
                     enabled = !downloading,
                     modifier = Modifier
