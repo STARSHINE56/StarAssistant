@@ -38,15 +38,27 @@ import org.json.JSONArray
  * 并发：写入方只有 ViewModel 一处，但读写可能跨线程（UI + 协程），用 [lock] 串行化，
  * 并且**先更新内存再落盘**，[readIds] 的订阅者（角标）不会被 IO 卡住。
  */
-class AnnouncementReadStore(context: Context) {
-
-    private val prefs = context.applicationContext
-        .getSharedPreferences(PREFS_NAME + "_" + AnnouncementApi.baseUrl.hashCode().toUInt().toString(16), Context.MODE_PRIVATE)
+class AnnouncementReadStore internal constructor(private val prefs: android.content.SharedPreferences) {
+    constructor(context: Context) : this(context.applicationContext.getSharedPreferences(
+        PREFS_NAME + "_" + AnnouncementApi.baseUrl.hashCode().toUInt().toString(16), Context.MODE_PRIVATE))
 
     private val lock = Any()
 
     /** 有序（最新在前）的已读 id，内存里的唯一真源 */
     private var ordered: List<String> = loadOrdered()
+    private var shown: Set<String> = loadOrdered(KEY_SHOWN_IDS).toSet()
+    fun shownIds(): Set<String> = synchronized(lock) { shown.toSet() }
+
+    /** Separate from read state. Never evict shown IDs, so an old ID cannot reappear after upgrades. */
+    fun markShown(id: String) {
+        val clean = id.trim()
+        if (clean.isEmpty()) return
+        synchronized(lock) {
+            if (clean in shown) return
+            shown = shown + clean
+            prefs.edit().putString(KEY_SHOWN_IDS, JSONArray(shown.toList()).toString()).apply()
+        }
+    }
 
     private val _readIds = MutableStateFlow(ordered.toSet())
 
@@ -88,8 +100,8 @@ class AnnouncementReadStore(context: Context) {
         }
     }
 
-    private fun loadOrdered(): List<String> {
-        val text = prefs.getString(KEY_READ_IDS, null) ?: return emptyList()
+    private fun loadOrdered(key: String = KEY_READ_IDS): List<String> {
+        val text = prefs.getString(key, null) ?: return emptyList()
         return try {
             val arr = JSONArray(text)
             val out = ArrayList<String>(arr.length())
@@ -112,6 +124,7 @@ class AnnouncementReadStore(context: Context) {
     companion object {
         private const val PREFS_NAME = "announcement_prefs"
         private const val KEY_READ_IDS = "read_ids"
+        private const val KEY_SHOWN_IDS = "shown_ids"
 
         /** 最多保留的已读记录条数（见类注释：多出来的从最旧的开始丢） */
         private const val MAX_KEEP = 500

@@ -220,7 +220,7 @@ object KernelProvisioner {
     private var lastReportBytes = 0L
     private var lastSpeed = 0L
 
-    fun isRunning(): Boolean = job?.isActive == true
+    fun isRunning(): Boolean = job?.isCompleted == false
 
     /** 关掉「完成/失败」弹窗时调用：只在没有任务在跑时才允许回到空闲 */
     fun reset() {
@@ -285,11 +285,12 @@ object KernelProvisioner {
      * 开始下载并导入。[source] 决定从哪条路拿直链；两条路都自动按本机 ABI 挑包。
      * 重复调用（已有任务在跑）直接忽略 —— 界面那个弹窗是不可关闭的，正常也点不到第二次。
      */
+    @Synchronized
     fun start(context: Context, release: KernelRelease, source: Source) {
         if (isRunning()) return
         val appContext = context.applicationContext
         keepAliveContext = appContext
-        job = scope.launch {
+        job = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             var cleanupDirFid: String? = null
             var cleanupCookie = ""
             var cleanupRepo: QuarkResolveRepository? = null
@@ -326,6 +327,13 @@ object KernelProvisioner {
                 val dir = GopeedEngine.kernelTempDir(appContext)
                 val chunkDir = File(dir, "chunks")
                 val target = File(dir, release.assetName)
+                val identity = "${release.tagName}|${release.assetName}|${release.assetSize}|${release.digest}"
+                val marker = File(dir, "download_identity")
+                if (runCatching { marker.readText() }.getOrNull() != identity) {
+                    chunkDir.deleteRecursively()
+                    target.delete()
+                    marker.writeText(identity)
+                }
                 val bytes = downloadToPrivate(appContext, plan, target, chunkDir)
 
                 _phase.value = Phase.Importing
@@ -382,14 +390,15 @@ object KernelProvisioner {
                 keepAliveContext = null
             }
         }
+        job?.start()
     }
 
     /** 取消下载（界面那个弹窗上的「取消」）。已下载的分片保留在私有目录，下次重下按断点续传接着走。 */
+    @Synchronized
     fun cancel() {
         val running = job ?: return
         runCatching { downloader?.cancelCalls(TASK_ID) }
         running.cancel()
-        job = null
         _phase.value = Phase.Idle
     }
 
@@ -592,6 +601,8 @@ object KernelProvisioner {
         }
         Log.d(TAG, "分片下载开始：total=$total chunks=${parts.size} threads=$threads")
 
+        // Changing thread count changes offsets; never reuse parts from another layout.
+        prepareResumeLayout(chunkDir, total, count)
         // 断点续传：上次取消/中断留下的分片算进初始进度，downloadChunk 自己从 partFile.length() 接着写
         val counter = AtomicLong(0L)
         parts.forEach { (part, start, end) ->
@@ -702,10 +713,20 @@ object KernelProvisioner {
         return String.format("%.1f %s", value, units[i])
     }
 
+    internal fun prepareResumeLayout(chunkDir: File, total: Long, count: Int) {
+        val layout = File(chunkDir, "layout")
+        val geometry = "$total:$count"
+        if (runCatching { layout.readText() }.getOrNull() != geometry) {
+            chunkDir.listFiles()?.filter { it.name.startsWith("part_") }?.forEach { it.delete() }
+            layout.writeText(geometry)
+        }
+    }
+
     /** 校验 GitHub 给的 sha256 摘要（网盘通道拿不到摘要，跳过）。失败即视为损坏，绝不拿去导入。 */
-    private fun verifyDigest(target: File, digest: String) {
+    internal fun verifyDigest(target: File, digest: String) {
         val expected = digest.removePrefix("sha256:").trim().lowercase()
-        if (expected.length != 64) return
+        if (digest.isBlank()) return
+        require(digest.startsWith("sha256:") && expected.matches(Regex("[0-9a-f]{64}"))) { "内核摘要格式无效" }
         val actual = withDigest(target)
         if (actual != expected) {
             throw IllegalStateException("内核包校验失败（sha256 不匹配），已丢弃：$actual")

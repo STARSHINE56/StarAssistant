@@ -27,39 +27,20 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
 
-/**
- * 应用内公告客户端（远程公告系统 v1.0.0）。
- *
- * 只用到两个**公开**接口（管理端 `/api/v1/admin/` 系列接口需要 ADMIN_TOKEN，客户端一律不碰）：
- * - `GET /api/v1/announcements?page=&pageSize=`：列表，**不含正文**；
- * - `GET /api/v1/announcements/{id}`：详情，含正文，且会让 `viewCount` +1（属于预期行为）。
- *
- * 三条硬约定（接口文档 §1.1 / §4 / §6）：
- * 1. 成功与否看响应体的 `success` 字段，**不要只看 HTTP 状态码**（业务失败与 HTTP 错误码是分离的）；
- * 2. 列表接口有副作用：每次成功调用都计入服务端当日「客户端启动数」，所以**不要轮询** ——
- *    只在启动检查与用户手动刷新/翻页时调用；
- * 3. 详情会让浏览量 +1，因此详情结果在 ViewModel 里按 id 缓存，避免重组 / 返回时重复请求。
- *
- * `content` 支持 Markdown / HTML（渲染交给 mikepenz 的 GFM 渲染器，与 README 预览同一套，
- * 不注入 WebView ⇒ 不存在脚本执行面）。
+/** Official COS JSON and optional compatible API sources share the existing models and UI.
+ * JSON is data only: actions are ignored and Markdown is rendered without WebView scripts.
  */
 object AnnouncementApi {
 
-    /**
-     * 公告服务地址（PHP + SQLite 虚拟主机版；接口契约与原 Cloudflare Workers 版完全一致，只有域名与协议变了）。
-     *
-     * ★ 当前部署是 **HTTP 明文**，而本项目的 `network_security_config.xml` 全局禁止明文 ⇒
-     *   那里为这个域名单独开了一条 cleartext 例外，**两处必须一起改**：
-     *   后端上 HTTPS 时把这里改回 `https://…` 并删掉那条 `<domain-config>`，
-     *   否则要么请求被系统直接拦掉（`CLEARTEXT communication to … not permitted`），要么白白留个明文口子。
-     *
-     * 图床域名与 API 域名无关：图片直链由服务端给出、客户端直接加载，http 图床同样要在
-     * network_security_config 里放行（见那里的注释），https 图床不受影响。
-     */
     private var settings: com.yunx.app.data.prefs.SettingsRepository? = null
-    val baseUrl: String get() = settings?.announcementBaseUrl.orEmpty()
-    val isConfigured: Boolean get() = baseUrl.isNotBlank()
-    fun install(context: android.content.Context) { settings = com.yunx.app.data.prefs.SettingsRepository(context.applicationContext) }
+    private var cachePrefs: android.content.SharedPreferences? = null
+    private val feedMutex = kotlinx.coroutines.sync.Mutex()
+    val baseUrl: String get() = AnnouncementSource.effective(settings?.announcementBaseUrl.orEmpty())
+    val isConfigured: Boolean get() = true
+    fun install(context: android.content.Context) {
+        settings = com.yunx.app.data.prefs.SettingsRepository(context.applicationContext)
+        cachePrefs = context.applicationContext.getSharedPreferences("announcement_cache", android.content.Context.MODE_PRIVATE)
+    }
 
     /**
      * 列表分页大小 = 接口上限 100。
@@ -95,6 +76,8 @@ object AnnouncementApi {
         val sortOrder: Int,
         val createdAt: String,
         val updatedAt: String,
+        val popup: Boolean = true,
+        val expiresAt: String? = null,
     ) {
         /** 生效时间（毫秒）：`publishAt` 为空表示「立即发布」，退回 createdAt；两者都解析不出来才是 0 */
         val effectiveMillis: Long get() = parseIsoMillis(publishAt) ?: parseIsoMillis(createdAt) ?: 0L
@@ -108,6 +91,7 @@ object AnnouncementApi {
         val totalPages: Int,
         val hasMore: Boolean,
         val list: List<Announcement>,
+        val warning: String? = null,
     )
 
     /** 请求结果：失败带上可直接展示的原因（服务端 `message` / HTTP 码 / 异常信息） */
@@ -117,8 +101,13 @@ object AnnouncementApi {
     }
 
     /** 获取公告列表（不含正文）；[page] 从 1 开始 */
-    suspend fun fetchPage(page: Int = 1, pageSize: Int = PAGE_SIZE): Result<Page> =
-        if (!isConfigured) Result.Success(Page(total = 0, page = page, pageSize = pageSize, totalPages = 0, hasMore = false, list = emptyList())) else
+    suspend fun fetchPage(page: Int = 1, pageSize: Int = PAGE_SIZE, forceRefresh: Boolean = false): Result<Page> =
+        if (AnnouncementSource.isStatic(baseUrl)) {
+            when (val feed = fetchStaticFeed(forceRefresh)) {
+                is Result.Failure -> feed
+                is Result.Success -> Result.Success(Page(feed.data.first.size, 1, feed.data.first.size, 1, false, feed.data.first, feed.data.second))
+            }
+        } else
         request("/api/v1/announcements?page=$page&pageSize=$pageSize") { data ->
             Page(
                 total = data.optInt("total"),
@@ -134,8 +123,98 @@ object AnnouncementApi {
      * 获取公告详情（含正文）。
      * 公告不存在 / 草稿 / 已下架 / 定时未到统一是 `404` + `code 40401`，服务端 message 可直接展示。
      */
-    suspend fun fetchDetail(id: String): Result<Announcement> =
-        request("/api/v1/announcements/${encodeId(id)}") { data -> parseAnnouncement(data) }
+    suspend fun fetchDetail(id: String, forceRefresh: Boolean = false): Result<Announcement> =
+        if (AnnouncementSource.isStatic(baseUrl)) {
+            when (val feed = fetchStaticFeed(forceRefresh)) {
+                is Result.Failure -> feed
+                is Result.Success -> feed.data.first.firstOrNull { it.id == id }?.let { Result.Success(it) }
+                    ?: Result.Failure("公告已过期或不存在")
+            }
+        } else request("/api/v1/announcements/${encodeId(id)}") { data -> parseAnnouncement(data) }
+
+    /** Fresh cache lasts 15 minutes; offline fallback is limited to 7 days and re-filters expiry. */
+    internal fun cacheUsable(savedAt: Long, now: Long, offline: Boolean): Boolean =
+        savedAt > 0L && now >= savedAt && now - savedAt <= if (offline) 7 * 86_400_000L else 15 * 60_000L
+
+    internal fun parseStaticFeed(body: String, now: Long = System.currentTimeMillis()): List<Announcement> {
+        val json = JSONObject(body)
+        require(json.optInt("schemaVersion") == 1) { "不支持的公告格式" }
+        if (json.has("enabled") && !json.optBoolean("enabled")) return emptyList()
+        val arr = json.optJSONArray("announcements") ?: throw IllegalArgumentException("缺少公告列表")
+        return (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
+            .filter { !it.has("enabled") || it.optBoolean("enabled") }
+            .map { item ->
+                parseAnnouncement(item).copy(
+                    publishAt = item.stringOrNull("publishedAt"),
+                    createdAt = item.stringOrNull("publishedAt").orEmpty(),
+                    isPinned = item.optBoolean("pinned"),
+                    popup = item.optBoolean("popup", false),
+                    expiresAt = item.stringOrNull("expiresAt"),
+                    publisher = Publisher("星辰助手", null)
+                )
+            }.filter { item ->
+                item.id.isNotBlank() && item.effectiveMillis <= now &&
+                    (item.expiresAt == null || (parseIsoMillis(item.expiresAt)?.let { it > now } == true))
+            }.distinctBy { it.id }
+            .sortedWith(compareByDescending<Announcement> { it.isPinned }.thenByDescending { it.effectiveMillis })
+    }
+
+    internal fun pickPopupCandidate(items: List<Announcement>, shown: Set<String>): Announcement? =
+        items.filter { it.popup && it.id.isNotBlank() && it.id !in shown }
+            .sortedWith(compareByDescending<Announcement> { it.isPinned }.thenByDescending { it.effectiveMillis })
+            .firstOrNull()
+
+    internal suspend fun fetchStaticFeed(
+        forceRefresh: Boolean,
+        source: String = baseUrl,
+        prefs: android.content.SharedPreferences? = cachePrefs,
+        client: okhttp3.OkHttpClient = HttpClients.apiClient(),
+        now: Long = System.currentTimeMillis()
+    ): Result<Pair<List<Announcement>, String?>> =
+        withContext(Dispatchers.IO) {
+            feedMutex.lock()
+            try {
+                // Exact source URL is the key: switching sources never mixes data.
+                val savedAt = prefs?.getLong(source + ":time", 0L) ?: 0L
+                val cached = prefs?.getString(source, null)
+                if (!forceRefresh && cached != null && cacheUsable(savedAt, now, false)) {
+                    runCatching { parseStaticFeed(cached, now) }.getOrNull()?.let {
+                        return@withContext Result.Success(it to null)
+                    }
+                }
+                try {
+                    val req = Request.Builder().url(source).header("Accept", "application/json")
+                        .header("Cache-Control", "no-cache").get().build()
+                    val body = client.newCall(req).execute().use { response ->
+                        require(response.isSuccessful) { "HTTP ${response.code}" }
+                        require((response.body?.contentLength() ?: -1L) <= 2 * 1024 * 1024) { "公告文件过大" }
+                        val input = response.body?.byteStream() ?: throw IllegalArgumentException("公告响应为空")
+                        val output = java.io.ByteArrayOutputStream()
+                        val buffer = ByteArray(8192)
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            require(output.size() + read <= 2 * 1024 * 1024) { "公告文件过大" }
+                            output.write(buffer, 0, read)
+                        }
+                        output.toString("UTF-8")
+                    }
+                    require(body.toByteArray().size <= 2 * 1024 * 1024) { "公告文件过大" }
+                    val items = parseStaticFeed(body, now)
+                    prefs?.edit()?.putString(source, body)?.putLong(source + ":time", now)?.apply()
+                    Result.Success(items to null)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    if (cached != null && cacheUsable(savedAt, now, true)) {
+                        runCatching { parseStaticFeed(cached, now) }.getOrNull()?.let {
+                            return@withContext Result.Success(it to "网络不可用，显示缓存公告")
+                        }
+                    }
+                    Result.Failure("公告加载失败，请检查网络后重试")
+                }
+            } finally { feedMutex.unlock() }
+        }
 
     /** 发 GET 请求并解析统一响应结构；所有失败路径都返回 [Result.Failure]（不抛异常） */
     private suspend fun <T> request(path: String, fromData: (JSONObject) -> T): Result<T> =
@@ -151,6 +230,7 @@ object AnnouncementApi {
                     .build()
                 HttpClients.apiClient().newCall(call).execute().use { resp ->
                     val text = resp.body?.string().orEmpty()
+                    if (!resp.isSuccessful) return@withContext Result.Failure("HTTP ${resp.code}")
                     if (text.isBlank()) {
                         // 服务端异常时可能连 JSON 都没有：这里只留 HTTP 码，够定位
                         Log.e(TAG, "公告响应为空（HTTP ${resp.code}，$url）")
@@ -159,6 +239,8 @@ object AnnouncementApi {
                     // ★ 非 2xx 也可能带合法 JSON（业务失败），所以先取 body 再交给 parseEnvelope 判 success
                     text
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "公告请求异常（$url）：${e.javaClass.simpleName}: ${e.message}", e)
                 return@withContext Result.Failure("${e.javaClass.simpleName}: ${e.message ?: "网络异常"}")
@@ -202,7 +284,7 @@ object AnnouncementApi {
             }
             out.add(parsed)
         }
-        return out
+        return out.distinctBy { it.id }
     }
 
     private fun parseStringArray(arr: JSONArray): List<String> {

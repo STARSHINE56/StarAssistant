@@ -17,12 +17,12 @@ android {
         targetSdk = 34
 
         versionCode = providers.gradleProperty("VERSION_CODE")
-            .orElse("1001010")
+            .orElse("1001012")
             .get()
             .toInt()
 
         versionName = providers.gradleProperty("VERSION_NAME")
-            .orElse("1.1.0")
+            .orElse("1.1.2")
             .get()
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -110,9 +110,18 @@ dependencies {
     implementation(libs.androidx.material3)
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("org.json:json:20240303")
     testImplementation("org.xerial:sqlite-jdbc:3.46.1.3")
 
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
+}
+
+// KSP2 keeps per-round intermediate Java beside its final output. Compile only final sources.
+tasks.withType<org.gradle.api.tasks.compile.JavaCompile>().configureEach {
+    exclude { element ->
+        val path = element.file.invariantSeparatorsPath
+        path.contains("/generated/ksp/") && path.contains("/byRounds/")
+    }
 }

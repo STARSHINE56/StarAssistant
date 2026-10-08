@@ -17,6 +17,7 @@ internal object HttpRangePolicy {
     fun matches(value: String?, requestedStart: Long, requestedEnd: Long?): Boolean {
         val range = parse(value) ?: return false
         if (range.start != requestedStart) return false
-        return requestedEnd == null || range.end == requestedEnd
+        return if (requestedEnd != null) range.end == requestedEnd
+        else range.total == null || range.end == range.total - 1
     }
 }

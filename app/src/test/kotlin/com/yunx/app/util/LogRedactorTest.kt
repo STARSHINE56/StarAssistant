@@ -37,4 +37,16 @@ class LogRedactorTest {
         val headers = LogRedactor.line("Cookie: sid=one; session=two | Authorization: Bearer three")
         for (secret in listOf("one","two","three")) assertFalse(headers.contains(secret))
     }
+    @Test
+    fun hidesJsonCloudCookiesAndSignatures() {
+        val line = LogRedactor.line("""{"BDUSS":"baidu-secret","stoken":"session-secret","rmkey":"mobile-secret","signature":"sign-secret","secret_key":"cos-secret"}""")
+        for (value in listOf("baidu-secret", "session-secret", "mobile-secret", "sign-secret", "cos-secret")) assertFalse(line.contains(value))
+    }
+    @Test
+    fun hidesQuotedPasswordAssignmentsContainingSpaces() {
+        val line = LogRedactor.line("password=\"two secret words\" | token='another secret value'")
+        assertFalse(line.contains("secret"))
+        assertFalse(line.contains("words"))
+        assertFalse(line.contains("value"))
+    }
 }

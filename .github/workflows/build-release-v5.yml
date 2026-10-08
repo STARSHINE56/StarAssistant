@@ -59,7 +59,7 @@ jobs:
           fi
 
           # A deliberate minor-version update is the minimum for the next release.
-          BASE_VERSION="1.1.0"
+          BASE_VERSION="1.1.2"
           if [ "$(printf '%s\n' "$VERSION" "$BASE_VERSION" | sort -V | tail -n 1)" = "$BASE_VERSION" ]; then
             VERSION="$BASE_VERSION"
           fi

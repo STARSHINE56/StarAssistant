@@ -218,16 +218,16 @@ fun MainScreen() {
         showOnboarding = !prefs.getBoolean("onboarding_shown", false)
     }
 
-    // 更新检测：请求 GitHub 最新 Release（仓库无 Release / 网络失败则不提示）
+    // 后台更新检测：COS 优先，GitHub 备用；失败静默，手动检查显示失败原因。
     var showUpdateDialog by remember { mutableStateOf(false) }
     var pendingRelease by remember { mutableStateOf<UpdateChecker.Release?>(null) }
     LaunchedEffect(Unit) {
         val release = (UpdateChecker.fetchLatestRelease(includePrerelease = com.yunx.app.ui.theme.ThemeController.acceptPrereleaseUpdate) as? UpdateChecker.CheckResult.Success)?.release ?: return@LaunchedEffect
-        val current = UpdateChecker.currentVersion(context)
         val prefs = context.getSharedPreferences("yunx_prefs", android.content.Context.MODE_PRIVATE)
         val ignored = prefs.getString("ignored_version", "")
-        if (UpdateChecker.compareVersions(release.tagName, current) > 0 &&
-            release.tagName != ignored
+        if (UpdateChecker.isNewer(release, context) &&
+            release.tagName != ignored &&
+            "${release.tagName}:${release.versionCode ?: 0}" != prefs.getString("notified_update", "")
         ) {
             pendingRelease = release
             showUpdateDialog = true
@@ -1057,7 +1057,7 @@ fun MainScreen() {
                                 when (result) {
                                     is UpdateChecker.CheckResult.Success -> {
                                         val current = UpdateChecker.currentVersion(context)
-                                        if (UpdateChecker.compareVersions(result.release.tagName, current) > 0) {
+                                        if (UpdateChecker.isNewer(result.release, context)) {
                                             pendingRelease = result.release
                                             showUpdateDialog = true
                                         } else {
@@ -1242,27 +1242,50 @@ fun MainScreen() {
         )
     }
 
+    popupAnnouncement?.let { announcement ->
+        if (!showOnboarding && !showAnnouncements && !showUpdateDialog) {
+            LaunchedEffect(announcement.id) { announcementViewModel.popupShown(announcement.id) }
+            AnnouncementPopupDialog(announcement,
+                onDetail = {
+                    announcementViewModel.consumePopup()
+                    announcementDetailId = announcement.id
+                    showAnnouncements = true
+                },
+                onDismiss = { announcementViewModel.consumePopup() })
+        }
+    }
+
     // 发现新版本弹窗（覆盖在主页之上）
     pendingRelease?.let { release ->
-        if (showUpdateDialog) {
+        if (showUpdateDialog && !showOnboarding && !showAnnouncements) {
+            LaunchedEffect(release.tagName, release.versionCode) {
+                context.getSharedPreferences("yunx_prefs", android.content.Context.MODE_PRIVATE).edit()
+                    .putString("notified_update", "${release.tagName}:${release.versionCode ?: 0}").apply()
+            }
             UpdateDialog(
                 currentVersion = UpdateChecker.currentVersion(context),
                 release = release,
                 onDownload = {
                     showUpdateDialog = false
-                    // 用内置下载功能下载更新 APK 到 Download 目录，并切到下载页
-                    val apk = release.assets.firstOrNull { it.name.endsWith(".apk", true) }
-                    if (apk != null) {
-                        scope.launch {
-                            downloadManager.enqueue(url = apk.downloadUrl, fileName = apk.name)
-                            currentTab = MainTab.Download
-                        }
-                        SnackbarController.show("已加入下载，完成后点击「打开」即可安装")
+                    val page = UpdateChecker.downloadPage(release)
+                    if (page != null) {
+                        runCatching { context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(page))) }
+                            .onFailure { SnackbarController.show("无法打开下载页面，请安装浏览器后重试") }
                     } else {
-                        SnackbarController.show("未找到 APK 下载链接")
+                        // GitHub APK assets retain the existing download path.
+                        val apk = release.assets.firstOrNull { it.name.endsWith(".apk", true) }
+                        if (apk != null) {
+                            scope.launch {
+                                downloadManager.enqueue(url = apk.downloadUrl, fileName = apk.name)
+                                currentTab = MainTab.Download
+                            }
+                            SnackbarController.show("已加入下载，完成后点击「打开」即可安装")
+                        } else {
+                            SnackbarController.show("未找到 APK 下载链接")
+                        }
                     }
                 },
-                onDownloadMirror = {
+                onDownloadMirror = if (release.assets.any { it.name.endsWith(".apk", true) }) ({
                     showUpdateDialog = false
                     // 镜像站下载：GitHub 直连慢/失败时走国内加速镜像
                     val apk = release.assets.firstOrNull { it.name.endsWith(".apk", true) }
@@ -1275,7 +1298,7 @@ fun MainScreen() {
                     } else {
                         SnackbarController.show("未找到 APK 下载链接")
                     }
-                },
+                }) else null,
                 onLater = { showUpdateDialog = false },
                 onIgnore = {
                     context.getSharedPreferences("yunx_prefs", android.content.Context.MODE_PRIVATE)
