@@ -2,6 +2,8 @@ name: Test Build APK
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: read
