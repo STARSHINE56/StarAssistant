@@ -100,7 +100,7 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
                 .url(url)
                 .apply {
                     if (withRange) header("Range", "bytes=0-0")
-                    headers.forEach { (k, v) -> header(k, v) }
+                    headers.forEach { (k, v) -> header(k, v) }; header("Accept-Encoding", "identity")
                 }
                 .get().build()
             val call = client.newCall(request)
@@ -157,7 +157,8 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
             val unknownTotal = end == Long.MAX_VALUE
             val expected = if (unknownTotal) -1L else end - start + 1
             // 分片已完整（含断点续传）：直接成功
-            if (!unknownTotal && existing >= expected) return@withContext ChunkResult.OK
+            if (!unknownTotal && existing > expected) return@withContext ChunkResult.FAILED
+            if (!unknownTotal && existing == expected) return@withContext ChunkResult.OK
 
             var preempted = false
             val res = try {
@@ -209,7 +210,7 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
         val request = Request.Builder()
             .url(url)
             .header("Range", if (unknownTotal) "bytes=$from-" else "bytes=$from-$end")
-            .apply { headers.forEach { (k, v) -> header(k, v) } }
+            .apply { headers.forEach { (k, v) -> header(k, v) }; header("Accept-Encoding", "identity") }
             .get().build()
 
         val call = client.newCall(request)
@@ -239,13 +240,15 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
                             return@use ChunkResult.FAILED
                         }
                         val body = response.body ?: return@use ChunkResult.FAILED
-                        val expected = if (unknownTotal) -1L else end - from + 1
+                        val range = HttpRangePolicy.parse(response.header("Content-Range")) ?: return@use ChunkResult.FAILED
+                        val expected = range.end - range.start + 1
+                        if (body.contentLength() >= 0 && body.contentLength() != expected) return@use ChunkResult.FAILED
                         // 写入分片，严格截断到预期区间
                         val written = writeSlice(body.byteStream(), partFile, existing, expected, preempt, onBytes)
                         // ★ 慢连接抢占：主动断开、保留已写字节（否则会被下面的「写入不足」误判为失败丢片）
                         if (preempt?.get() == true) throw PreemptedException()
                         // ★ 校验：206 也必须写满预期字节，否则视为失败（防空洞/损坏）
-                        if (!unknownTotal && written != expected) {
+                        if (written != expected) {
                             Log.w(TAG, "downloadChunk: task=$taskId 分片写入不足 written=$written 预期=$expected")
                             return@use ChunkResult.FAILED
                         }
@@ -318,7 +321,7 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
         Log.d(TAG, "downloadFull: task=$taskId 完整下载 origin=${LogRedactor.url(url)} total=$total")
         val request = Request.Builder()
             .url(url)
-            .apply { headers.forEach { (k, v) -> header(k, v) } }
+            .apply { headers.forEach { (k, v) -> header(k, v) }; header("Accept-Encoding", "identity") }
             .get().build()
         val call = client.newCall(request)
         val callSet = synchronized(activeCalls) {
@@ -338,8 +341,11 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
                     Log.w(TAG, "downloadFull: task=$taskId 返回 text/html（疑似过期/防盗链/错误页），终止")
                     throw IllegalStateException("下载失败：链接已失效或需要 Referer（返回 HTML 页）")
                 }
-                if (!response.isSuccessful) throw IllegalStateException("下载失败 HTTP $statusCode")
+                if (statusCode != 200) throw IllegalStateException("完整下载响应异常 HTTP $statusCode")
                 val body = response.body ?: return@use false
+                if (total > 0 && body.contentLength() >= 0 && body.contentLength() != total) {
+                    throw IllegalStateException("文件大小发生变化，拒绝保存可能损坏的文件")
+                }
                 // 已知总大小时写时硬截断：服务器多给/Content-Range 偏差的字节直接丢弃，文件永不膨胀
                 val expected = if (total > 0) (total - existing).coerceAtLeast(0) else -1L
                 var written = 0L

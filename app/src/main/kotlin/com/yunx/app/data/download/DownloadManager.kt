@@ -749,7 +749,19 @@ class DownloadManager(
             .onFailure { Log.w(TAG, "读取引擎任务详情失败，用本地文件名兜底：id=${task.id} ${it.message}") }
             .getOrNull()
         val realName = detail?.name?.takeIf { it.isNotBlank() } ?: task.fileName
-        val savedPath = File(dir, realName).absolutePath
+        val output = File(dir, realName)
+        val savedPath = output.absolutePath
+        val outputError = GopeedEngine.completedOutputError(output, size, detail?.folder ?: output.isDirectory)
+        if (outputError != null) {
+            dao.updateStatus(task.id, DownloadTaskEntity.STATUS_FAILED)
+            dao.updateError(task.id, outputError)
+            _stats.update { it - task.id }
+            taskStartTimes.remove(task.id)
+            taskEngineIds.remove(task.id)
+            releaseEngineTaskMemory(task.id)
+            if (engineKeepAliveIds.remove(task.id)) onTaskFinished()
+            return
+        }
         // 平均速度 = 引擎给出的总大小 ÷ 本段运行时长（暂停/继续会重置起点，与内置下载器口径一致）
         val startedAt = taskStartTimes.remove(task.id) ?: 0L
         val avgSpeed = if (startedAt > 0L && size > 0L) {
