@@ -19,6 +19,7 @@
 package com.yunx.app.data.announcement
 
 import java.text.SimpleDateFormat
+import java.text.ParsePosition
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
@@ -47,13 +48,16 @@ private val ISO_PATTERNS = listOf(
 
 /** 解析 ISO 8601 时间为毫秒时间戳；空串 / 无法识别返回 null（调用方自己决定兜底口径） */
 fun parseIsoMillis(raw: String?): Long? {
-    val text = raw?.trim().orEmpty()
+    val text = raw?.trim().orEmpty().replace(Regex("([+-]\\d{2}):(\\d{2})$"), "$1$2")
     if (text.isEmpty()) return null
     for (pattern in ISO_PATTERNS) {
         val parsed: Date? = try {
-            SimpleDateFormat(pattern, Locale.US)
-                .apply { if (pattern.endsWith("'Z'")) timeZone = TimeZone.getTimeZone("UTC") }
-                .parse(text)
+            val format = SimpleDateFormat(pattern, Locale.US).apply {
+                isLenient = false
+                if (pattern.endsWith("'Z'")) timeZone = TimeZone.getTimeZone("UTC")
+            }
+            val position = ParsePosition(0)
+            format.parse(text, position)?.takeIf { position.index == text.length }
         } catch (e: Exception) {
             null
         }
