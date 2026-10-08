@@ -91,6 +91,15 @@ class AnnouncementViewModel(private val readStore: AnnouncementReadStore) : View
     private val detailCache = mutableMapOf<String, AnnouncementApi.Announcement>()
 
     private var startupChecked = false
+    private var popupOffered = false
+    private fun offerPopup(items: List<AnnouncementApi.Announcement>) {
+        if (popupOffered) return
+        AnnouncementApi.pickPopupCandidate(items, readStore.shownIds())?.let {
+            popupOffered = true
+            _popup.value = it
+        }
+    }
+    fun popupShown(id: String) { readStore.markShown(id) }
 
     /**
      * 启动检查：整个会话只跑一次（列表 + 未读角标 + 弹窗候选都由这一次请求的结果决定）。
@@ -113,7 +122,7 @@ class AnnouncementViewModel(private val readStore: AnnouncementReadStore) : View
                             hasMore = page.hasMore
                         )
                     }
-                    _popup.value = pickPopupCandidate(page.list, readStore.readIds.value)
+                    offerPopup(page.list)
                 }
             }
         }
@@ -151,7 +160,7 @@ class AnnouncementViewModel(private val readStore: AnnouncementReadStore) : View
         val id = (_detail.value as? DetailUiState.Loaded)?.item?.id ?: return
         detailCache.remove(id)
         viewModelScope.launch {
-            when (val result = AnnouncementApi.fetchDetail(id)) {
+            when (val result = AnnouncementApi.fetchDetail(id, forceRefresh = true)) {
                 is AnnouncementApi.Result.Failure ->
                     SnackbarController.show("公告刷新失败：${result.message}")
                 is AnnouncementApi.Result.Success -> {
@@ -169,7 +178,7 @@ class AnnouncementViewModel(private val readStore: AnnouncementReadStore) : View
         if (state.loading || state.refreshing) return
         _list.value = state.copy(loading = !refreshing, refreshing = refreshing, error = null)
         viewModelScope.launch {
-            when (val result = AnnouncementApi.fetchPage(page = 1, pageSize = AnnouncementApi.PAGE_SIZE)) {
+            when (val result = AnnouncementApi.fetchPage(page = 1, pageSize = AnnouncementApi.PAGE_SIZE, forceRefresh = refreshing)) {
                 is AnnouncementApi.Result.Failure -> {
                     _list.update { it.copy(loading = false, refreshing = false, error = result.message) }
                     SnackbarController.show("公告加载失败：${result.message}")
@@ -183,9 +192,11 @@ class AnnouncementViewModel(private val readStore: AnnouncementReadStore) : View
                             hasMore = page.hasMore,
                             loading = false,
                             refreshing = false,
-                            error = null
+                            error = page.warning
                         )
                     }
+                    if (refreshing && page.warning != null) SnackbarController.show(page.warning)
+                    offerPopup(page.list)
                 }
             }
         }
@@ -279,23 +290,6 @@ class AnnouncementViewModel(private val readStore: AnnouncementReadStore) : View
     fun markAllRead() {
         val count = readStore.markAllRead(_list.value.items.map { it.id })
         SnackbarController.show(if (count > 0) "已将 $count 条公告标为已读" else "没有未读公告")
-    }
-
-    /**
-     * 启动弹窗候选（需求口径）：
-     * 1. 有**未读的置顶公告** → 取它（服务端已把置顶排在最前，组内按 sortOrder、publishAt 倒序，取第一条未读置顶即可）；
-     * 2. 否则取**最新的一条未读** —— 不能直接拿列表第一条：首条可能是「已读的置顶公告」，
-     *    这时「最新未读」应按生效时间（publishAt，缺失时 createdAt）取最大值；
-     * 3. 全部已读 → 不弹（null）。
-     */
-    private fun pickPopupCandidate(
-        items: List<AnnouncementApi.Announcement>,
-        read: Set<String>
-    ): AnnouncementApi.Announcement? {
-        val unread = items.filter { it.id.isNotEmpty() && it.id !in read }
-        if (unread.isEmpty()) return null
-        unread.firstOrNull { it.isPinned }?.let { return it }
-        return unread.maxByOrNull { it.effectiveMillis } ?: unread.first()
     }
 
     class Factory(private val readStore: AnnouncementReadStore) : ViewModelProvider.Factory {
