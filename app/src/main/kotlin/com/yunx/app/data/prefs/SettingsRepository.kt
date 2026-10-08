@@ -162,7 +162,7 @@ class SettingsRepository(context: Context) {
             prefs.edit().putBoolean("diagnostic_mode", value).apply()
         }
 
-    /** StarAssistant's own announcement API base; empty means announcements are disabled. */
+    /** Optional source override; empty uses the official COS feed. */
     var announcementBaseUrl: String
         get() = prefs.getString("announcement_base_url", "").orEmpty()
         set(value) { prefs.edit().putString("announcement_base_url", com.yunx.app.data.announcement.AnnouncementSource.normalize(value)).apply() }
