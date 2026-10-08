@@ -19,6 +19,9 @@
 package com.yunx.app.data.update
 
 import android.content.Context
+import android.os.Build
+import kotlinx.coroutines.CancellationException
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import android.util.Log
 import com.yunx.app.data.network.HttpClients
 import kotlinx.coroutines.Dispatchers
@@ -28,7 +31,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * GitHub Release 更新检测。
+ * 官方 COS version.json 优先，禁用/异常/不符合通道时回退 GitHub Release。
  * 正式版通道（默认）：GET https://api.github.com/repos/STARSHINE56/StarAssistant/releases/latest
  * 预发布通道（设置页开启「接受预发布版更新」后）：GET https://api.github.com/repos/STARSHINE56/StarAssistant/releases
  *
@@ -40,6 +43,7 @@ object UpdateChecker {
 
     /** 本应用自己的仓库（更新检测默认走它） */
     const val APP_REPO = "STARSHINE56/StarAssistant"
+    const val COS_VERSION_URL = "https://starassistant-1308286552.cos.ap-beijing.myqcloud.com/version.json"
 
     private fun latestUrl(repo: String) = "https://api.github.com/repos/$repo/releases/latest"
 
@@ -84,7 +88,10 @@ object UpdateChecker {
         /** Release 页面地址（html_url），供「打开 GitHub 页面」跳浏览器 */
         val htmlUrl: String,
         /** 是否为 GitHub Pre-release：正式版通道恒为 false，预发布通道可能为 true */
-        val prerelease: Boolean = false
+        val prerelease: Boolean = false,
+        val versionCode: Long? = null,
+        val downloadPageUrl: String? = null,
+        val title: String = "发现新版本"
     )
 
     /** 更新检测结果：失败时带上可读原因（HTTP 码 / 异常信息），既写 E 级日志也直接给用户提示 */
@@ -105,7 +112,7 @@ object UpdateChecker {
             ?.groupValues
             ?.getOrNull(1)
             ?.trim()
-            ?.takeIf { it.isNotBlank() }
+            ?.let { safeWebUrl(it) }
 
     /** capsule-render 头图（波浪 banner）：只要 `<img>` 里出现这个域名就整段删掉（不依赖属性顺序） */
     private val CAPSULE_BANNER_REGEX =
@@ -162,32 +169,78 @@ object UpdateChecker {
         return kept.joinToString("\n").trim()
     }
 
-    /**
-     * 比较两个版本号：v1 > v2 返回正数，v1 < v2 返回负数，相等返回 0。
-     * 兼容 fork 构建后缀（如 "1.2.6-gh1"）：每段取数字前缀比较，后缀（-gh<n> 等）不影响主版本比较。
-     * 数字段完全相同时，只有两边都带后缀（预发布版，如 "1.3.0-beta1"）才继续比后缀：先比后缀里第一段数字
-     * （beta2 > beta1），再按字符串比较；一边没有后缀则视为相等，免得把 fork 构建（1.2.6-gh1）判成比同号正式版旧。
-     */
+    /** SemVer release channels compare naturally; historical -ghN fork suffixes stay equivalent. */
     fun compareVersions(v1: String, v2: String): Int {
-        val parts1 = v1.trimStart('v').split(".")
-        val parts2 = v2.trimStart('v').split(".")
-        val maxLength = maxOf(parts1.size, parts2.size)
-        for (i in 0 until maxLength) {
-            val num1 = parts1.getOrNull(i)?.let { DIGITS.find(it)?.value?.toIntOrNull() } ?: 0
-            val num2 = parts2.getOrNull(i)?.let { DIGITS.find(it)?.value?.toIntOrNull() } ?: 0
-            if (num1 != num2) return num1 - num2
+        fun normalized(v: String) = v.trim().removePrefix("v").removePrefix("V").substringBefore('+')
+        val a = normalized(v1)
+        val b = normalized(v2)
+        val mainA = a.substringBefore('-').split('.')
+        val mainB = b.substringBefore('-').split('.')
+        for (i in 0 until maxOf(mainA.size, mainB.size)) {
+            val x = mainA.getOrNull(i)?.toLongOrNull() ?: 0L
+            val y = mainB.getOrNull(i)?.toLongOrNull() ?: 0L
+            if (x != y) return x.compareTo(y)
         }
-        if (v1 == v2) return 0
-        val suffix1 = v1.trimStart('v').substringAfter('-', "")
-        val suffix2 = v2.trimStart('v').substringAfter('-', "")
-        if (suffix1.isEmpty() || suffix2.isEmpty()) return 0
-        val pre1 = DIGITS.find(suffix1)?.value?.toIntOrNull() ?: 0
-        val pre2 = DIGITS.find(suffix2)?.value?.toIntOrNull() ?: 0
-        if (pre1 != pre2) return pre1 - pre2
-        return suffix1.compareTo(suffix2)
+        fun suffix(v: String) = v.substringAfter('-', "").lowercase().takeUnless { it.matches(Regex("gh\\d+")) }.orEmpty()
+        val sa = suffix(a)
+        val sb = suffix(b)
+        if (sa == sb) return 0
+        if (sa.isEmpty()) return 1
+        if (sb.isEmpty()) return -1
+        fun parts(v: String) = Regex("[a-z]+|[0-9]+").findAll(v).map { it.value }.toList()
+        val pa = parts(sa)
+        val pb = parts(sb)
+        for (i in 0 until maxOf(pa.size, pb.size)) {
+            val x = pa.getOrNull(i) ?: return -1
+            val y = pb.getOrNull(i) ?: return 1
+            val nx = x.toLongOrNull()
+            val ny = y.toLongOrNull()
+            val cmp = when {
+                nx != null && ny != null -> nx.compareTo(ny)
+                nx != null -> -1
+                ny != null -> 1
+                else -> x.compareTo(y)
+            }
+            if (cmp != 0) return cmp
+        }
+        return 0
     }
 
-    private val DIGITS = Regex("\\d+")
+    fun currentVersionCode(context: Context): Long {
+        val info = context.packageManager.getPackageInfo(context.packageName, 0)
+        return if (Build.VERSION.SDK_INT >= 28) info.longVersionCode else info.versionCode.toLong()
+    }
+
+    internal fun isNewer(release: Release, currentName: String, currentCode: Long): Boolean =
+        release.versionCode?.let { it > currentCode } ?: (compareVersions(release.tagName, currentName) > 0)
+
+    fun isNewer(release: Release, context: Context): Boolean =
+        isNewer(release, currentVersion(context), currentVersionCode(context))
+
+    fun safeWebUrl(raw: String?): String? {
+        val url = raw?.trim()?.toHttpUrlOrNull() ?: return null
+        return url.takeIf { it.username.isEmpty() && it.password.isEmpty() }?.toString()
+    }
+    fun downloadPage(release: Release): String? = release.downloadPageUrl ?: netdiskDownloadUrl(release.body)
+    fun hasDownload(release: Release): Boolean = downloadPage(release) != null ||
+        release.assets.any { it.name.endsWith(".apk", true) && safeWebUrl(it.downloadUrl) != null }
+
+    /** Disabled entries and disallowed channels use GitHub; malformed active entries also fall back. */
+    internal fun parseCosVersion(body: String, includePrerelease: Boolean): Release? {
+        val json = JSONObject(body)
+        require(json.optInt("schemaVersion") == 1) { "不支持的更新格式" }
+        if (!json.optBoolean("enabled")) return null
+        val name = json.optString("versionName").trim()
+        val code = json.optLong("versionCode", -1L)
+        require(name.matches(Regex("[vV]?[0-9]+(?:\\.[0-9]+)+(?:[-+][A-Za-z0-9.+-]+)?")) && code in 1..2100000000L) { "更新数据缺少有效版本号" }
+        val pre = json.optBoolean("prerelease") || name.substringBefore('+').contains('-')
+        if (pre && !includePrerelease) return null
+        return Release(name, cleanReleaseNotes(json.optString("changelog", "")), emptyList(),
+            json.optString("publishedAt", "").takeUnless { it == "null" }.orEmpty(),
+            "https://github.com/$APP_REPO/releases", pre, code,
+            safeWebUrl(json.optString("downloadUrl", "")),
+            json.optString("title", "发现新版本").ifBlank { "发现新版本" })
+    }
 
     /** 当前应用版本号（packageManager.versionName） */
     fun currentVersion(context: Context): String =
@@ -196,7 +249,7 @@ object UpdateChecker {
         }.getOrNull() ?: "1.0"
 
     /**
-     * 请求 GitHub 最新 Release。
+     * 请求官方 COS 更新或 GitHub 最新 Release。
      * [includePrerelease] = true 时改走预发布通道（Release 列表接口，按发布时间倒序取第一条非 Draft 版本），
      * 这样标了 Pre-release 的版本也会被当成可更新版本；false 时走 `/releases/latest`（GitHub 只给正式版）。
      * 任何失败（网络异常 / HTTP 非 2xx / 响应缺字段）都在这里打 E 级日志，并把原因带回调用方，
@@ -206,15 +259,24 @@ object UpdateChecker {
         includePrerelease: Boolean = false,
         repo: String = APP_REPO
     ): CheckResult = withContext(Dispatchers.IO) {
-        runCatching {
-            if (includePrerelease) requestReleaseList(repo) else requestLatestRelease(repo)
+        var cosFailure = ""
+        if (repo == APP_REPO) {
+            try {
+                when (val body = fetchBody(COS_VERSION_URL)) {
+                    is BodyResult.Error -> cosFailure = body.reason
+                    is BodyResult.Ok -> parseCosVersion(body.text, includePrerelease)?.let {
+                        return@withContext CheckResult.Success(it)
+                    }
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { cosFailure = "COS 响应异常或网络不可用" }
         }
-            .onFailure { e ->
-                Log.e(TAG, "获取最新 Release 异常（$repo）：${e.javaClass.simpleName}: ${e.message}", e)
-            }
-            .getOrElse { e ->
-                CheckResult.Failure("${e.javaClass.simpleName}: ${e.message ?: "未知错误"}")
-            }
+        val github = try {
+            if (includePrerelease) requestReleaseList(repo) else requestLatestRelease(repo)
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) { CheckResult.Failure("GitHub 网络不可用，请稍后重试") }
+        if (github is CheckResult.Failure && cosFailure.isNotBlank())
+            CheckResult.Failure("COS：$cosFailure；GitHub：${github.reason}") else github
     }
 
     /** 正式版通道：GET /releases/latest，GitHub 保证返回最新的非 Pre-release、非 Draft 版本 */
@@ -261,7 +323,8 @@ object UpdateChecker {
         val client = HttpClients.apiClient()
         val request = Request.Builder()
             .url(url)
-            .header("Accept", "application/vnd.github+json")
+            .header("Accept", if (url == COS_VERSION_URL) "application/json" else "application/vnd.github+json")
+            .header("Cache-Control", "no-cache")
             .header("User-Agent", "XingChenAssistant")
             .get()
             .build()
@@ -288,7 +351,7 @@ object UpdateChecker {
 
     /** 解析单个 Release 对象；缺 tag_name 等硬性字段时返回失败 */
     private fun parseRelease(json: JSONObject): CheckResult {
-        val tag = json.optString("tag_name")
+        val tag = json.optString("tag_name").takeUnless { it == "null" }.orEmpty()
         if (tag.isBlank()) {
             Log.e(TAG, "获取最新 Release 失败：Release 数据缺少版本号")
             return CheckResult.Failure("Release 数据缺少版本号")
@@ -302,13 +365,13 @@ object UpdateChecker {
                             name = a.optString("name"),
                             downloadUrl = a.optString("browser_download_url"),
                             size = a.optLong("size"),
-                            digest = a.optString("digest")
+                            digest = a.optString("digest").takeUnless { it == "null" }.orEmpty()
                         )
                     )
                 }
             }
         }
-        val rawBody = json.optString("body")
+        val rawBody = json.optString("body").takeUnless { it == "null" }.orEmpty()
         // 说明正文只在这一处清洗（UpdateSheet / 网盘链接提取读到的都是清洗后的那份，别再各清一遍）
         val body = cleanReleaseNotes(rawBody)
         val prerelease = json.optBoolean("prerelease")
