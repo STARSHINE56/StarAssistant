@@ -288,7 +288,12 @@ object DiagnosticLog {
         ZipOutputStream(BufferedOutputStream(FileOutputStream(out))).use { zip ->
             files.forEach { f ->
                 zip.putNextEntry(ZipEntry(f.name))
-                f.inputStream().use { input -> input.copyTo(zip) }
+                // Re-redact historical logs with the current policy before sharing.
+                f.bufferedReader(Charsets.UTF_8).use { input ->
+                    input.lineSequence().forEach { line ->
+                        zip.write((LogRedactor.line(line).replace('\u0000', ' ') + "\n").toByteArray(Charsets.UTF_8))
+                    }
+                }
                 zip.closeEntry()
             }
         }

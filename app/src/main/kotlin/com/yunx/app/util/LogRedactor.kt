@@ -6,7 +6,7 @@ import java.net.URI
 object LogRedactor {
     private val absoluteUrl = Regex("""https?://[^\s\"'<>]+""", RegexOption.IGNORE_CASE)
     private val secretAssignment = Regex(
-        """(?i)\b(cookie|authorization|access[_-]?token|refresh[_-]?token|captcha[_-]?token|app[_-]?token|token|password|passwd|pwd|device[_-]?sign|bduss|stoken|__puus|__pus|rmkey|signature|sign)\b(\s*[=:]\s*)([^\s,;]+)"""
+        """(?i)\b(cookie|authorization|access[_-]?token|refresh[_-]?token|captcha[_-]?token|app[_-]?token|token|password|passwd|pwd|device[_-]?sign|bduss|stoken|__puus|__pus|rmkey|signature|sign|secret[_-]?key)\b(\s*[=:]\s*)([^\s,;]+)"""
     )
 
     fun url(value: Any?): String {
@@ -21,10 +21,12 @@ object LogRedactor {
         }.getOrDefault("<invalid-url>")
     }
 
-    private val jsonSecret = Regex("""(?i)(["'](?:cookie|authorization|access[_-]?token|refresh[_-]?token|captcha[_-]?token|app[_-]?token|token|password|passwd|pwd|device[_-]?sign)["']\s*:\s*)"(?:\\.|[^"\\])*"""")
+    private val jsonSecret = Regex("""(?i)(["'](?:cookie|authorization|access[_-]?token|refresh[_-]?token|captcha[_-]?token|app[_-]?token|token|password|passwd|pwd|device[_-]?sign|bduss|stoken|__puus|__pus|rmkey|signature|sign|secret[_-]?key)["']\s*:\s*)"(?:\\.|[^"\\])*"""")
     private val authHeader = Regex("""(?i)\b(cookie|authorization)(\s*[=:]\s*)(.*?)(?=\s+\w*token\s*=|\s+password\s*=|[|\r\n]|$)""")
+    private val quotedSecretAssignment = Regex("""(?i)\b(cookie|authorization|access[_-]?token|refresh[_-]?token|captcha[_-]?token|app[_-]?token|token|password|passwd|pwd|device[_-]?sign|bduss|stoken|__puus|__pus|rmkey|signature|sign|secret[_-]?key)\b(\s*[=:]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')""")
     fun line(value: String): String {
-        val json = jsonSecret.replace(value) { it.groupValues[1] + "\"<redacted>\"" }
+        val quoted = quotedSecretAssignment.replace(value) { it.groupValues[1] + it.groupValues[2] + "<redacted>" }
+        val json = jsonSecret.replace(quoted) { it.groupValues[1] + "\"<redacted>\"" }
         val headers = authHeader.replace(json) { it.groupValues[1] + it.groupValues[2] + "<redacted>" }
         val withoutUrls = absoluteUrl.replace(headers) { match -> url(match.value) }
         return secretAssignment.replace(withoutUrls) { match ->
