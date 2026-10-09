@@ -30,25 +30,34 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Campaign
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -466,31 +475,63 @@ fun AnnouncementPopupDialog(
         relativeTime(announcement.effectiveMillis).takeIf { it.isNotBlank() }
     ).joinToString(" · ")
 
-    AlertDialog(
+    Dialog(
         onDismissRequest = onDismiss,
-        icon = {
-            AnnouncementChip(
-                text = if (announcement.isPinned) "置顶公告" else "最新公告",
-                containerColor = MaterialTheme.colorScheme.primaryContainer,
-                contentColor = MaterialTheme.colorScheme.onPrimaryContainer
-            )
-        },
-        title = {
-            Text(
-                text = announcement.title,
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-        },
-        text = {
-            Column {
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            shape = MaterialTheme.shapes.extraLarge,
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 6.dp,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp)
+        ) {
+            Column(modifier = Modifier.padding(24.dp)) {
+                // 头部：喇叭图标徽标 + 类型标签
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(42.dp)
+                            .background(
+                                MaterialTheme.colorScheme.primaryContainer,
+                                RoundedCornerShape(13.dp)
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Campaign,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    AnnouncementChip(
+                        text = if (announcement.isPinned) "置顶公告" else "最新公告",
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(20.dp))
+
+                Text(
+                    text = announcement.title,
+                    style = MaterialTheme.typography.headlineSmall,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis
+                )
+
+                if (meta.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = meta,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
                 val cover = announcement.coverImage
                 if (!cover.isNullOrBlank()) {
-                    // ★ 弹窗封面走**固定高度**，不用 autoHeight：弹窗高度必须可预期 ——
-                    //   按图片原始比例的话，一张方图/长图就能把弹窗撑满、把标题和摘要挤成一团
-                    //   （实测症状：图片占了大半个弹窗、标题看不见、摘要压在图上）。
-                    //   写死 180dp + Crop 铺满，任何比例的图都只占 180dp。
+                    Spacer(modifier = Modifier.height(16.dp))
                     RemoteImage(
                         url = cover,
                         contentDescription = null,
@@ -500,31 +541,38 @@ fun AnnouncementPopupDialog(
                             .fillMaxWidth()
                             .height(180.dp)
                     )
-                    Spacer(modifier = Modifier.height(12.dp))
                 }
-                if (announcement.summary.isNotBlank()) {
+
+                // 弹窗正文：优先用完整正文 content，缺了再退回摘要 summary；
+                // 否则只填摘要的公告在弹窗里会一片空白，被迫点「查看详情」才能看到内容。
+                val body = announcement.content?.takeIf { it.isNotBlank() } ?: announcement.summary
+                if (body.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(12.dp))
                     Text(
-                        text = announcement.summary,
+                        text = body,
                         style = MaterialTheme.typography.bodyMedium,
-                        maxLines = 4,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 8,
                         overflow = TextOverflow.Ellipsis
                     )
-                    Spacer(modifier = Modifier.height(8.dp))
                 }
-                if (meta.isNotBlank()) {
-                    Text(
-                        text = meta,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    TextButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.weight(1f)
+                    ) { Text("知道了") }
+                    Button(
+                        onClick = onDetail,
+                        modifier = Modifier.weight(1f)
+                    ) { Text("查看详情") }
                 }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = onDetail) { Text("查看详情") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("知道了") }
         }
-    )
+    }
 }
