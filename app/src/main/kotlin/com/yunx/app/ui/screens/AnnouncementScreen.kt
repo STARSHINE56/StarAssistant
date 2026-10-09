@@ -38,13 +38,16 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Campaign
 import androidx.compose.material.icons.outlined.Close
@@ -58,6 +61,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.mikepenz.markdown.m3.Markdown
+import com.yunx.app.ui.components.GitHubMarkdownImageTransformer
+import com.yunx.app.ui.components.compactMarkdownTypography
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -545,16 +551,23 @@ fun AnnouncementPopupDialog(
 
                 // 弹窗正文：优先用完整正文 content，缺了再退回摘要 summary；
                 // 否则只填摘要的公告在弹窗里会一片空白，被迫点「查看详情」才能看到内容。
+                // 正文走 Markdown 渲染（与详情页同一套），但弹窗内限高可滚动，完整阅读仍走「查看详情」。
                 val body = announcement.content?.takeIf { it.isNotBlank() } ?: announcement.summary
                 if (body.isNotBlank()) {
                     Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        text = body,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 8,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    val mdTypo = remember { compactMarkdownTypography() }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 240.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        Markdown(
+                            content = body,
+                            typography = mdTypo,
+                            imageTransformer = GitHubMarkdownImageTransformer
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(24.dp))
