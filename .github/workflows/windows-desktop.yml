@@ -1,0 +1,118 @@
+name: Windows Desktop
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: '1.0.0'
+      source_ref:
+        type: string
+        default: ''
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Package version (same as Android release, e.g. 1.0.1)'
+        required: true
+        default: '1.0.0'
+  push:
+    branches: [feature/windows-desktop]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+env:
+  YUNX_USE_MIRROR: 'false'
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      JAVA_TOOL_OPTIONS: "-Dfile.encoding=UTF-8"
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Validate version
+        shell: pwsh
+        env:
+          REQUESTED_VERSION: ${{ inputs.version || '1.0.0' }}
+        run: |
+          if ($env:REQUESTED_VERSION -notmatch '^\d+\.\d+\.\d+$') { throw 'Version must be X.Y.Z' }
+          "PACKAGE_VERSION=$env:REQUESTED_VERSION" >> $env:GITHUB_ENV
+      - name: Install WiX 3 for jpackage
+        shell: pwsh
+        run: |
+          $wix = Get-ChildItem 'C:\Program Files (x86)' -Filter 'WiX Toolset v3*' -Directory | Select-Object -First 1
+          if (!$wix) {
+            choco install wixtoolset --version=3.14.1 --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $wix = Get-ChildItem 'C:\Program Files (x86)' -Filter 'WiX Toolset v3*' -Directory | Select-Object -First 1
+          }
+          if (!$wix) { throw 'WiX 3 not found' }
+          "$($wix.FullName)\bin" >> $env:GITHUB_PATH
+      - name: Test and compile shared and desktop
+        shell: pwsh
+        run: |
+          .\gradlew.bat --no-daemon --console=plain -PdesktopOnly=true "-PVERSION_NAME=$env:PACKAGE_VERSION" :shared:test :desktopApp:test :desktopApp:compileKotlin
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Package Windows x64 EXE and MSI
+        shell: pwsh
+        run: |
+          .\gradlew.bat --no-daemon --console=plain -PdesktopOnly=true "-PVERSION_NAME=$env:PACKAGE_VERSION" :desktopApp:packageExe :desktopApp:packageMsi
+          if ($LASTEXITCODE -ne 0) {
+            $packageExit = $LASTEXITCODE
+            Get-ChildItem desktopApp/build/compose/logs -Recurse -File | ForEach-Object { Write-Host $_.FullName; Get-Content $_.FullName }
+            exit $packageExit
+          }
+          New-Item output -ItemType Directory -Force
+          foreach ($extension in @('exe','msi')) {
+            $file = Get-ChildItem desktopApp/build/compose/binaries/main/$extension -Filter "*.$extension" | Select-Object -First 1
+            if (!$file) { throw "Missing $extension installer" }
+            Copy-Item $file.FullName "output/XingChen-Assistant-v$env:PACKAGE_VERSION-Windows-x64.$extension"
+          }
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: XingChen-Assistant-v${{ env.PACKAGE_VERSION }}-Windows-x64
+          path: output/*
+          if-no-files-found: error
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-test-reports
+          path: |
+            shared/build/reports/tests
+            desktopApp/build/reports/tests
+            desktopApp/build/compose/logs
+  android-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install Android SDK packages
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-36' 'build-tools;35.0.0'
+          printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
+      - name: Verify Android without changing signing or version
+        run: |
+          bash gradlew --no-daemon --console=plain -Pandroid.aapt2FromMavenOverride="$ANDROID_HOME/build-tools/35.0.0/aapt2" :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Android-regression
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            app/build/reports

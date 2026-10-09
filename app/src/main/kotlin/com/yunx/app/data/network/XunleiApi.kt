@@ -352,7 +352,7 @@ class XunleiApi(
     fun jwtExp(token: String): Long = runCatching {
         val payload = token.split(".").getOrNull(1) ?: return@runCatching 0L
         val json = String(
-            android.util.Base64.decode(payload, android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING)
+            WireBase64.decode(payload, WireBase64.URL_SAFE or WireBase64.NO_PADDING)
         )
         JSONObject(json).optLong("exp")
     }.getOrDefault(0L)
@@ -361,7 +361,7 @@ class XunleiApi(
     private fun jwtSub(token: String): String = runCatching {
         val payload = token.split(".").getOrNull(1) ?: return@runCatching ""
         val json = String(
-            android.util.Base64.decode(payload, android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING)
+            WireBase64.decode(payload, WireBase64.URL_SAFE or WireBase64.NO_PADDING)
         )
         JSONObject(json).optString("sub")
     }.getOrDefault("")
