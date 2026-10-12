@@ -332,6 +332,7 @@ object KernelProvisioner {
                 if (runCatching { marker.readText() }.getOrNull() != identity) {
                     chunkDir.deleteRecursively()
                     target.delete()
+                    dir.mkdirs()
                     marker.writeText(identity)
                 }
                 val bytes = downloadToPrivate(appContext, plan, target, chunkDir)
