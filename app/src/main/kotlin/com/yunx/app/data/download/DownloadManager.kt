@@ -1425,17 +1425,17 @@ class DownloadManager(
         val elasticStart = plan.elasticStart
         val resourceFile = File(chunkDir, "resource.json")
         val resource = metadata
+        val old = if (resourceFile.exists()) JSONObject(resourceFile.readText()) else JSONObject()
+        val oldEtag = old.optString("etag")
+        val oldModified = old.optString("modified")
         if (resourceFile.exists()) {
-            val old = JSONObject(resourceFile.readText())
-            val oldEtag = old.optString("etag")
-            val oldModified = old.optString("modified")
             if (oldEtag.isNotBlank() && resource?.etag?.isNotBlank() == true && oldEtag != resource.etag ||
                 oldModified.isNotBlank() && resource?.lastModified?.isNotBlank() == true && oldModified != resource.lastModified) {
                 throw SourceChangedException("文件内容已发生变化，拒绝拼接旧分片")
             }
         }
-        val expectedEtag = resource?.etag?.takeIf { it.isNotBlank() } ?: task.etag.takeIf { it.isNotBlank() }
-        val modified = resource?.lastModified?.takeIf { it.isNotBlank() } ?: task.lastModified
+        val expectedEtag = resource?.etag?.takeIf { it.isNotBlank() } ?: oldEtag.takeIf { it.isNotBlank() } ?: task.etag.takeIf { it.isNotBlank() }
+        val modified = resource?.lastModified?.takeIf { it.isNotBlank() } ?: oldModified.takeIf { it.isNotBlank() } ?: task.lastModified
         resourceFile.writeText(JSONObject().put("etag", expectedEtag.orEmpty()).put("modified", modified).toString())
         val mainParts = (0 until mainPoolCount).map { i ->
             val start = i * chunkSize

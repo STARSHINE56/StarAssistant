@@ -319,7 +319,7 @@ fun SettingsScreen(
         SettingsItem(
             icon = Icons.Outlined.Tune,
             title = "下载线程数",
-            description = "按网盘分别设置分片并发数（默认 32，最高 512）",
+            description = "按网盘设置并发上限；内置引擎自动调速，资源安全上限 128",
             onClick = {
                 showThreadsDialog = true
             }
