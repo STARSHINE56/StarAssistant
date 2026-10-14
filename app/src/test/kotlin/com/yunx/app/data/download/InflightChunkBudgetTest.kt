@@ -46,8 +46,9 @@ class InflightChunkBudgetTest {
         assertTrue(DownloadManager.inflightChunksFor(256L * MB) <= 512)
         assertTrue(DownloadManager.inflightChunksFor(512L * MB) <= 512)
         assertTrue(DownloadManager.inflightChunksFor(1024L * MB) <= 512)
-        // 本机那种 256MB 堆（无 largeHeap）：选 512 就是 512 路，不再被夹到 256
-        assertEquals(512, DownloadManager.inflightChunksFor(256L * MB))
+        // Include a separate native thread/TLS ceiling rather than counting only read buffers.
+        assertEquals(128, DownloadManager.inflightChunksFor(256L * MB))
+        assertEquals(128, DownloadManager.inflightChunksFor(1024L * MB))
     }
 
     @Test

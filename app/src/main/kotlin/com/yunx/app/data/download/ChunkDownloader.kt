@@ -4,6 +4,9 @@ import android.util.Log
 import com.yunx.app.util.LogRedactor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
@@ -42,6 +45,9 @@ internal const val BUFFER_SIZE = 64 * 1024
  * - FAILED        : 结构性失败（非 206/200、HTML 广告页、写入字节数不足等）。
  */
 enum class ChunkResult { OK, RANGE_IGNORED, FAILED }
+
+internal class SourceChangedException(message: String) : IOException(message)
+internal data class ResourceMetadata(val total: Long?, val etag: String, val lastModified: String)
 
 /**
  * ★ 慢连接抢占信号（内部使用，永不外泄）。
@@ -88,44 +94,50 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
 
     // ---------- 总大小探测 ----------
 
-    suspend fun getTotalSize(url: String, headers: Map<String, String>): Long? = withContext(DownloadManager.chunkIoDispatcher) {
-        val withRange = probeSize(url, headers, withRange = true)
-        if (withRange != null) return@withContext withRange
-        probeSize(url, headers, withRange = false)
+    suspend fun getTotalSize(url: String, headers: Map<String, String>): Long? =
+        probeResource(url, headers)?.total
+
+    internal suspend fun probeResource(url: String, headers: Map<String, String>): ResourceMetadata? =
+        withContext(DownloadManager.chunkIoDispatcher) {
+            probeResourceAttempt(url, headers, true) ?: probeResourceAttempt(url, headers, false)
+        }
+
+    private suspend fun probeResourceAttempt(url: String, headers: Map<String, String>, ranged: Boolean): ResourceMetadata? {
+        val request = Request.Builder().url(url).apply {
+            headers.filterKeys { !it.equals("Range", true) && !it.equals("If-Range", true) }.forEach { (k, v) -> header(k, v) }
+            header("Accept-Encoding", "identity")
+            if (ranged) header("Range", "bytes=0-0")
+        }.get().build()
+        val call = client.newCall(request)
+        val parent = coroutineContext[Job]
+        val monitor = monitorCall(call, parent, null)
+        try {
+            return call.execute().use { response ->
+                if (!response.isSuccessful || response.header("Content-Type").orEmpty().contains("text/html", true)) return@use null
+                val total = if (ranged) {
+                    if (response.code != 206) return@use null
+                    val range = HttpRangePolicy.parse(response.header("Content-Range")) ?: return@use null
+                    if (range.start != 0L || range.end != 0L) return@use null
+                    range.total
+                } else {
+                    if (response.code != 200) return@use null
+                    response.header("Content-Length")?.toLongOrNull()?.takeIf { it > 0 }
+                }
+                ResourceMetadata(total, response.header("ETag").orEmpty(), response.header("Last-Modified").orEmpty())
+            }
+        } catch (e: IOException) {
+            if (parent?.isActive == false) throw CancellationException("下载被取消", e)
+            return null
+        } finally { monitor.cancel() }
     }
 
-    private suspend fun probeSize(url: String, headers: Map<String, String>, withRange: Boolean): Long? =
-        withContext(DownloadManager.chunkIoDispatcher) {
-            val request = Request.Builder()
-                .url(url)
-                .apply {
-                    if (withRange) header("Range", "bytes=0-0")
-                    headers.forEach { (k, v) -> header(k, v) }; header("Accept-Encoding", "identity")
-                }
-                .get().build()
-            val call = client.newCall(request)
-            val cancelHandle = coroutineContext[Job]?.invokeOnCompletion { call.cancel() }
-            try {
-                runCatching {
-                    call.execute().use { response ->
-                        Log.d(TAG, "getTotalSize: range=$withRange code=${response.code} ct=${response.header("Content-Type")} origin=${LogRedactor.url(url)}")
-                        // ★ 防盗链/过期/错误页（HTML）直接视为无法取大小，回退流式/单流
-                        if (response.header("Content-Type").orEmpty().contains("text/html", ignoreCase = true)) {
-                            return@use null
-                        }
-                        if (!response.isSuccessful) return@use null
-                        if (withRange) {
-                            if (response.code != 206) return@use null
-                            val range = HttpRangePolicy.parse(response.header("Content-Range"))
-                                ?: return@use null
-                            if (range.start != 0L || range.end != 0L) return@use null
-                            range.total
-                        } else {
-                            response.header("Content-Length")?.toLongOrNull()?.takeIf { it > 0 }
-                        }
-                    }
-                }.getOrNull()
-            } finally { cancelHandle?.dispose() }
+    /** Completion handlers alone do not interrupt a blocked read during cancellation. */
+    private fun monitorCall(call: Call, parent: Job?, preempt: AtomicBoolean?): Job =
+        CoroutineScope(Dispatchers.IO).launch {
+            while (isActive) {
+                if (parent?.isActive == false || preempt?.get() == true) { call.cancel(); break }
+                delay(100)
+            }
         }
 
     // ---------- 分片下载 ----------
@@ -147,6 +159,9 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
         headers: Map<String, String>,
         /** 慢连接抢占标志（由 DownloadManager 看门狗置位）；null = 不抢占 */
         preempt: AtomicBoolean? = null,
+        expectedTotal: Long? = null,
+        expectedEtag: String? = null,
+        onCongestion: ((Long) -> Unit)? = null,
         onBytes: suspend (Long) -> Unit
     ): ChunkResult = withContext(DownloadManager.chunkIoDispatcher) {
         val attempts = CHUNK_RETRIES + RANGE_RETRIES
@@ -162,7 +177,7 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
 
             var preempted = false
             val res = try {
-                doChunkAttempt(taskId, url, from, end, unknownTotal, partFile, headers, existing, preempt, onBytes)
+                doChunkAttempt(taskId, url, from, end, unknownTotal, partFile, headers, existing, preempt, expectedTotal, expectedEtag, onCongestion, onBytes)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: PreemptedException) {
@@ -171,7 +186,10 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
                 preempted = true
                 Log.w(TAG, "downloadChunk: task=$taskId 慢连接被抢占，换连接续传（已收 ${partFile.length()} 字节）")
                 null
+            } catch (e: SourceChangedException) {
+                throw e
             } catch (e: IOException) {
+                if (preempt?.get() == true && isActive) { preempt.set(false); preempted = true }
                 Log.w(TAG, "downloadChunk: task=$taskId 尝试${attempt + 1} IO异常: ${e.message}")
                 if (!isActive) throw CancellationException("下载被取消", e)
                 null
@@ -205,12 +223,15 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
         headers: Map<String, String>,
         existing: Long,
         preempt: AtomicBoolean?,
+        expectedTotal: Long?,
+        expectedEtag: String?,
+        onCongestion: ((Long) -> Unit)?,
         onBytes: suspend (Long) -> Unit
     ): ChunkResult {
         val request = Request.Builder()
             .url(url)
+            .apply { headers.filterKeys { !it.equals("Range", true) }.forEach { (k, v) -> header(k, v) }; header("Accept-Encoding", "identity") }
             .header("Range", if (unknownTotal) "bytes=$from-" else "bytes=$from-$end")
-            .apply { headers.forEach { (k, v) -> header(k, v) }; header("Accept-Encoding", "identity") }
             .get().build()
 
         val call = client.newCall(request)
@@ -218,9 +239,18 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
             activeCalls.getOrPut(taskId) { newCallSet() }.also { it.add(call) }
         }
         val cancelHandle = coroutineContext[Job]?.invokeOnCompletion { call.cancel() }
+        val monitor = monitorCall(call, coroutineContext[Job], preempt)
         try {
             return call.execute().use { response ->
                 val statusCode = response.code
+                if (statusCode == 429 || statusCode == 503) {
+                    onCongestion?.invoke(TransferHttpPolicy.retryAfter(response.header("Retry-After")))
+                    return@use ChunkResult.FAILED
+                }
+                val responseEtag = response.header("ETag")
+                if (!expectedEtag.isNullOrBlank() && !responseEtag.isNullOrBlank() && expectedEtag != responseEtag) {
+                    throw SourceChangedException("文件内容已发生变化，拒绝拼接旧分片")
+                }
                 if (DownloadSourceRefreshPolicy.isExpiredHttpStatus(statusCode)) {
                     markSourceExpiryFailure(taskId, statusCode)
                     Log.w(TAG, "downloadChunk: task=$taskId 临时直链可能失效 HTTP $statusCode")
@@ -241,6 +271,9 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
                         }
                         val body = response.body ?: return@use ChunkResult.FAILED
                         val range = HttpRangePolicy.parse(response.header("Content-Range")) ?: return@use ChunkResult.FAILED
+                        if (expectedTotal != null && range.total != null && range.total != expectedTotal) {
+                            throw SourceChangedException("文件大小发生变化，拒绝续传")
+                        }
                         val expected = range.end - range.start + 1
                         if (body.contentLength() >= 0 && body.contentLength() != expected) return@use ChunkResult.FAILED
                         // 写入分片，严格截断到预期区间
@@ -256,6 +289,9 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
                     }
                     200 -> {
                         Log.w(TAG, "downloadChunk: task=$taskId Range 请求返回 200，拒绝按分片写入")
+                        if (headers.keys.any { it.equals("If-Range", true) }) {
+                            throw SourceChangedException("续传校验未通过，服务器返回整文件")
+                        }
                         ChunkResult.RANGE_IGNORED
                     }
                     else -> {
@@ -271,6 +307,7 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
                 if (callSet.isEmpty() && activeCalls[taskId] === callSet) activeCalls.remove(taskId)
             }
             cancelHandle?.dispose()
+            monitor.cancel()
         }
     }
 
@@ -328,6 +365,7 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
             activeCalls.getOrPut(taskId) { newCallSet() }.also { it.add(call) }
         }
         val cancelHandle = coroutineContext[Job]?.invokeOnCompletion { call.cancel() }
+        val monitor = monitorCall(call, coroutineContext[Job], null)
         try {
             call.execute().use { response ->
                 val statusCode = response.code
@@ -388,6 +426,7 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
                 if (callSet.isEmpty() && activeCalls[taskId] === callSet) activeCalls.remove(taskId)
             }
             cancelHandle?.dispose()
+            monitor.cancel()
         }
     }
 

@@ -163,17 +163,14 @@ fun ThemeScreen(
     var appIconVariant by remember { mutableStateOf(settingsRepo.appIconVariant) }
     var iconExpanded by rememberSaveable { mutableStateOf(true) }
     val switchAppIcon: (Int) -> Unit = { variant ->
-        val pm = context.packageManager
-        val main = ComponentName(context, "com.yunx.app.MainActivity")
-        val alias = ComponentName(context, "com.yunx.app.MainActivityIcon2")
-        if (variant == 1) {
-            pm.setComponentEnabledSetting(alias, PackageManager.COMPONENT_ENABLED_STATE_ENABLED, PackageManager.DONT_KILL_APP)
-            pm.setComponentEnabledSetting(main, PackageManager.COMPONENT_ENABLED_STATE_DISABLED, PackageManager.DONT_KILL_APP)
-        } else {
-            pm.setComponentEnabledSetting(main, PackageManager.COMPONENT_ENABLED_STATE_ENABLED, PackageManager.DONT_KILL_APP)
-            pm.setComponentEnabledSetting(alias, PackageManager.COMPONENT_ENABLED_STATE_DISABLED, PackageManager.DONT_KILL_APP)
+        try {
+            LauncherIconSwitcher.switch(context, variant)
+            settingsRepo.appIconVariant = variant
+            appIconVariant = variant
+        } catch (error: Exception) {
+            android.util.Log.w("LauncherIcon", "图标切换失败", error)
+            android.widget.Toast.makeText(context, "图标切换失败，已保留桌面入口", android.widget.Toast.LENGTH_LONG).show()
         }
-        settingsRepo.appIconVariant = variant
     }
 
     Scaffold(
@@ -484,7 +481,6 @@ fun ThemeScreen(
                                     name = "经典图标",
                                     isSelected = appIconVariant == 0,
                                     onClick = {
-                                        appIconVariant = 0
                                         switchAppIcon(0)
                                     }
                                 )
@@ -493,7 +489,6 @@ fun ThemeScreen(
                                     name = "新图标",
                                     isSelected = appIconVariant == 1,
                                     onClick = {
-                                        appIconVariant = 1
                                         switchAppIcon(1)
                                     }
                                 )

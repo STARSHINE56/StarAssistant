@@ -24,6 +24,43 @@ class ChunkDownloaderHttpTest {
         assertEquals("bytes=3-5", s.takeRequest().getHeader("Range"))
         assertEquals("abcdef", f.readText())
     }
+    @Test fun rejectsChangedEtagBeforeWriting() = withDownload { s, d, f ->
+        f.writeText("abc")
+        s.enqueue(MockResponse().setResponseCode(206).setHeader("ETag", "\"new\"").setHeader("Content-Range", "bytes 3-5/6").setBody("def"))
+        assertThrows(SourceChangedException::class.java) { runBlocking {
+            d.downloadChunk(1, s.url("/file").toString(), 0, 5, f, emptyMap(), expectedTotal = 6, expectedEtag = "\"old\"") {}
+        } }
+        assertEquals("abc", f.readText())
+    }
+    @Test fun rejectsChangedTotalBeforeWriting() = withDownload { s, d, f ->
+        s.enqueue(MockResponse().setResponseCode(206).setHeader("Content-Range", "bytes 0-2/9").setBody("abc"))
+        assertThrows(SourceChangedException::class.java) { runBlocking {
+            d.downloadChunk(1, s.url("/file").toString(), 0, 2, f, emptyMap(), expectedTotal = 6) {}
+        } }
+        assertEquals(0, f.length())
+    }
+    @Test fun conditionalRangeCannotSilentlyFallBackToMixedContent() = withDownload { s, d, f ->
+        f.writeText("abc")
+        s.enqueue(MockResponse().setBody("abcdef"))
+        assertThrows(SourceChangedException::class.java) { runBlocking {
+            d.downloadChunk(1, s.url("/file").toString(), 0, 5, f, mapOf("If-Range" to "\"old\"")) {}
+        } }
+        assertEquals("abc", f.readText())
+    }
+    @Test fun serverCongestionDoesNotWriteErrorBody() = withDownload { s, d, f ->
+        var wait = 0L
+        s.enqueue(MockResponse().setResponseCode(429).setHeader("Retry-After", "2").setBody("slow down"))
+        assertEquals(ChunkResult.FAILED, d.downloadChunk(1, s.url("/file").toString(), 0, 2, f, emptyMap(), onCongestion = { wait = it }) {})
+        assertEquals(2000L, wait)
+        assertEquals(0L, f.length())
+    }
+    @Test fun capturesResourceMetadataAndProtectsRangeHeader() = withDownload { s, d, _ ->
+        s.enqueue(MockResponse().setResponseCode(206).setHeader("Content-Range", "bytes 0-0/6").setHeader("ETag", "\"version\"").setBody("a"))
+        val metadata = d.probeResource(s.url("/file").toString(), mapOf("Range" to "bytes=9-10"))!!
+        assertEquals(6L, metadata.total)
+        assertEquals("\"version\"", metadata.etag)
+        assertEquals("bytes=0-0", s.takeRequest().getHeader("Range"))
+    }
     @Test fun rejectsOversizedExistingPartWithoutClaimingComplete() = withDownload { s, d, f ->
         f.writeText("toolong")
         assertEquals(ChunkResult.FAILED, d.downloadChunk(1, s.url("/file").toString(), 0, 2, f, emptyMap()) {})
