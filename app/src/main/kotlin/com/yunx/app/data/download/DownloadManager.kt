@@ -192,20 +192,9 @@ class DownloadManager(
     /** 全局限速器（令牌桶）：所有任务合计不超过 speedLimitProvider 的字节/秒 */
     private val speedLimiter = SpeedLimiter()
 
-    /**
-     * ★ 全进程在飞分片信号量（跨任务共享）。
-     *   这里钉的是「同时在飞的下载请求数」，而不是设置里的线程数：分片 IO 都是**同步阻塞**的
-     *   `call.execute()`，设置写 512 也只是「允许 512 路同时下」，真正的闸门是这道信号量
-     *   （容量 [MAX_INFLIGHT_CHUNKS]，按最大堆预算推导、封顶 512）。
-     *   OOM（见 log/oom）的历史机制在 OkHttp 侧：HTTP/2 客户端对外声明 **每流 16MB** 窗口
-     *   （`OKHTTP_CLIENT_WINDOW_SIZE`），消费端一慢（写盘慢、限速挂起、落盘节流），读线程仍会把数据
-     *   填进该流 readBuffer 直到 16MB 用完 —— 几十路叠加就能撑满 256MB 堆，两份 OOM 报告的栈正好
-     *   落在 `Http2Stream$FramingSource.receive` / okio `SegmentPool` 上。现已从源头拆掉：
-     *   ① 下载客户端固定 HTTP/1.1（无应用层流窗口，读多少由 TCP 背压决定，见 HttpClients.buildDownload）；
-     *   ② 每路读缓冲 64KB（原本 256KB，[ChunkDownloader.BUFFER_SIZE]）；
-     *   ③ 在飞路数由本信号量钉住：512 路 × 64KB = 32MB，占 256MB 堆的 1/8（FD 实测软限 32768，1100 个连接+句柄远未用满）；
-     *   ④ 分片 IO 走专用线程池 `chunkIoDispatcher`（不再受 `Dispatchers.IO` 的 `max(64, 核数)` 限制）。
-     *   ★ 绝不手动 release；也不要改回「每任务一个信号量」。
+    /** Shared across tasks: Java read-buffer budget plus a conservative 128 thread/TLS ceiling.
+     * HTTP/1.1 retains TCP backpressure. Task admission must occur before this permit.
+     * Never release manually or replace this with a per-task limiter.
      */
     private val inflightLimiter = Semaphore(MAX_INFLIGHT_CHUNKS)
 
@@ -288,7 +277,7 @@ class DownloadManager(
     /**
      * ★ 慢连接抢占（永久逻辑）：把「跑得远低于同伴」的在飞分片换到新连接上续传。
      *
-     * 判定阈值 = max(绝对下限 PREEMPT_MIN_BPS, 本任务平均单连接速度 / 2)：
+     * 判定阈值 = max(绝对下限 PREEMPT_MIN_BPS, 当前同伴窗口速度中位数 / 2)：
      * 用相对值是为了适配不同 CDN 的限速档次（夸克单连接几十 KB/s、迅雷更低），绝对下限兜住
      * 「收尾只剩一两路、平均值被自己拉低」的退化情况。命中后只把 [InflightChunk.preempt] 置位，
      * 由 ChunkDownloader 断开连接并从已收字节续传——不丢数据、不退避、不改变对外结果。
@@ -299,14 +288,13 @@ class DownloadManager(
      */
     private fun preemptSlowChunks(
         id: Long,
-        downloaded: Long,
-        elapsedMs: Long,
-        workers: Int,
         diag: Map<String, InflightChunk>
     ) {
         if (diag.isEmpty()) return
-        val avgPerConn = if (elapsedMs > 0 && workers > 0) downloaded * 1000 / elapsedMs / workers else 0L
-        val floor = maxOf(PREEMPT_MIN_BPS, avgPerConn / 2)
+        // Use the current peer window, not all historical bytes divided by current tail workers.
+        val peerSpeeds = diag.values.map { it.lastBps }.sorted()
+        val median = peerSpeeds.getOrNull(peerSpeeds.size / 2) ?: return
+        val floor = maxOf(PREEMPT_MIN_BPS, median / 2)
         val now = System.currentTimeMillis()
         var taken = 0
         for (d in diag.values.sortedBy { it.lastBps }) {
@@ -1333,8 +1321,7 @@ class DownloadManager(
         val oldSize = task.totalSize.takeIf { it > 0 }
         val newSize = refreshed.fileSize.takeIf { it > 0 }
         if (oldSize != null && newSize != null && oldSize != newSize) {
-            Log.w(TAG, "refreshSource: id=$id 文件大小变化 old=$oldSize new=$newSize，拒绝续传")
-            return false
+            throw SourceChangedException("文件大小发生变化，拒绝续传")
         }
 
         if (task.etag.isNotBlank() && refreshed.etag.isNotBlank() && task.etag != refreshed.etag ||
@@ -1363,6 +1350,7 @@ class DownloadManager(
         // 协程已被取消（暂停/删除）：直接退出，不写状态
         if (!isTaskActive()) return
         var task = dao.get(id) ?: return
+        downloader.consumeSourceExpiryFailure(id) // discard a stale marker from a previous cancelled run
         dao.updateStatus(id, DownloadTaskEntity.STATUS_DOWNLOADING)
         updatePhase(id, "下载中")
         taskStartTimes[id] = System.currentTimeMillis()
@@ -1485,6 +1473,10 @@ class DownloadManager(
                         }
                         notifyProgress(id, task.fileName, new, total)
                         persistProgressIfDue(id, new, total, false, lastPersistAt)
+                    }.also {
+                        if (downloader.hasSourceExpiryFailure(id)) {
+                            throw java.io.IOException("临时下载链接失效，准备刷新")
+                        }
                     }
                 } finally { inflightChunks.remove(key) }
             }
@@ -1492,7 +1484,6 @@ class DownloadManager(
 
         coroutineScope {
             // A single watchdog covers primary downloads AND repair passes; cancellation is immediate on exit.
-            val started = System.currentTimeMillis()
             var sampledBytes = 0L
             val watchdog = launch(Dispatchers.IO) {
                 while (isActive) {
@@ -1504,8 +1495,7 @@ class DownloadManager(
                     val runtime = Runtime.getRuntime()
                     connections.sample(windowSpeed, nextIdx.get() < mainParts.size || tail.hasPending(),
                         (runtime.totalMemory() - runtime.freeMemory()) > runtime.maxMemory() * 3 / 4)
-                    preemptSlowChunks(id, newBytes.get(), System.currentTimeMillis() - started,
-                        inflightChunks.size.coerceAtLeast(1), inflightChunks)
+                    preemptSlowChunks(id, inflightChunks)
                 }
             }
             try {
@@ -1966,7 +1956,7 @@ class DownloadManager(
         }
         // 任务池：每线程平均领 8 片，天然抗慢片拖尾（比 1:1 映射多 8 倍盈余）
         val want = maxOf(bySize, threads * 8)
-        return minOf(want, (total / minChunkBytes).toInt().coerceAtLeast(1), 512)
+        return minOf(want.toLong(), (total / minChunkBytes).coerceAtLeast(1), 512L).toInt()
     }
 
     companion object {
@@ -1982,7 +1972,7 @@ class DownloadManager(
         /**
          * 全进程在飞分片上限（进程启动时按堆预算推导，保守封顶 128）。
          * 由 `inflightLimiter` 用作信号量容量：无论用户怎么调线程数、同时开几个任务，
-         * 同时在飞的下载请求数都不会超过它 —— 这是 OOM（见 log/oom）的根治手段。
+         * 同时在飞的下载请求数都不会超过它；不代表所有机型都不会出现资源不足。
          */
         val MAX_INFLIGHT_CHUNKS: Int = inflightChunksFor(Runtime.getRuntime().maxMemory())
 

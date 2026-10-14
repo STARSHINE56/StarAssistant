@@ -1,7 +1,5 @@
 package com.yunx.app.ui.screens
 
-import android.content.ComponentName
-import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility

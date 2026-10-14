@@ -30,6 +30,31 @@ class DownloadTransferPolicyTest {
             assertFalse(tail.hasPending())
         } finally { dir.deleteRecursively() }
     }
+    @Test fun randomResumeHolesProduceExactNonOverlappingCoverage() {
+        val random = java.util.Random(73)
+        repeat(50) {
+            val dir = createTempDir()
+            try {
+                val start = 123L
+                val total = 2 * 1024 * 1024L + 317
+                var cursor = start
+                while (cursor < total) {
+                    val end = minOf(total - 1, cursor + 100000 + random.nextInt(100000))
+                    if (random.nextBoolean()) {
+                        val file = File(dir, "seg_${cursor}_${end}.part")
+                        file.writeBytes(ByteArray(random.nextInt((end - cursor + 2).toInt())))
+                    }
+                    cursor = end + 1
+                }
+                val tail = ResumableTail(dir, start, total)
+                val parts = generateSequence { tail.take(256 * 1024L + random.nextInt(512 * 1024)) }.toList()
+                assertEquals(start, parts.first().start)
+                assertEquals(total - 1, parts.last().end)
+                assertEquals(total - start, parts.sumOf { it.size })
+                parts.zipWithNext().forEach { (a, b) -> assertEquals(a.end + 1, b.start) }
+            } finally { dir.deleteRecursively() }
+        }
+    }
     @Test fun tailRejectsOverlapAndOversizedParts() {
         val dir = createTempDir()
         try {

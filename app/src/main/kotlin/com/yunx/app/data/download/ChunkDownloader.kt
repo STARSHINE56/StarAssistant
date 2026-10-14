@@ -82,6 +82,8 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
     fun consumeSourceExpiryFailure(taskId: Long): Int? =
         sourceExpiryFailures.remove(taskId)
 
+    internal fun hasSourceExpiryFailure(taskId: Long): Boolean = sourceExpiryFailures.containsKey(taskId)
+
     private fun markSourceExpiryFailure(taskId: Long, code: Int) {
         sourceExpiryFailures[taskId] = code
     }
@@ -192,6 +194,9 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
                 if (preempt?.get() == true && isActive) { preempt.set(false); preempted = true }
                 Log.w(TAG, "downloadChunk: task=$taskId 尝试${attempt + 1} IO异常: ${e.message}")
                 if (!isActive) throw CancellationException("下载被取消", e)
+                if (!preempted && attempt >= 1 && DownloadFailurePolicy.isNetworkFailure(e)) {
+                    onCongestion?.invoke(1000L)
+                }
                 null
             }
 
