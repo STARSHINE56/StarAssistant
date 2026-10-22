@@ -2,7 +2,8 @@
 agp = "8.13.0"
 kotlin = "2.1.0"
 coreKtx = "1.17.0"
-webkit = "1.17.1"   # 登录 WebView：关闭 X-Requested-With + 同步桌面 client hints（UserAgentMetadata）
+webkit = "1.12.1"   # 登录 WebView：关闭 X-Requested-With + 同步桌面 client hints（UserAgentMetadata）
+                    # ★ 钉在 1.12.1：星辰 minSdk 保持 23，而 webkit 1.13+ 起要求 minSdk 24（清单合并会直接失败）
 lifecycleRuntimeKtx = "2.9.2"
 activityCompose = "1.11.0"
 composeBom = "2026.06.01"
