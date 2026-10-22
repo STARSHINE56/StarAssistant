@@ -10,7 +10,9 @@ import androidx.lifecycle.viewModelScope
 import com.yunx.app.data.db.BookmarkDao
 import com.yunx.app.data.db.BookmarkEntity
 import com.yunx.app.data.download.DownloadManager
+import com.yunx.app.data.download.DownloadPathPolicy
 import com.yunx.app.data.download.DownloadPlatform
+import com.yunx.app.data.download.DownloadSource
 import com.yunx.app.data.network.BaiduConstants
 import com.yunx.app.data.network.C139Constants
 import com.yunx.app.data.network.GuangYaConstants
@@ -29,12 +31,19 @@ import com.yunx.app.data.network.QuarkConstants
 import com.yunx.app.data.network.QuarkCdn
 import com.yunx.app.data.network.ShareLinkParser
 import com.yunx.app.data.network.SharePlatform
+import com.yunx.app.data.network.StarSeaApi
 import com.yunx.app.data.network.UCConstants
 import com.yunx.app.data.network.XunleiConstants
 import com.yunx.app.data.network.XunleiKouling
 import com.yunx.app.data.network.model.DownloadLink
 import com.yunx.app.data.network.model.ShareFile
 import com.yunx.app.data.network.model.ShareSession
+import com.yunx.app.data.network.video.VideoLinkParser
+import com.yunx.app.data.network.video.VideoMedia
+import com.yunx.app.data.network.video.VideoMediaKind
+import com.yunx.app.data.network.video.VideoParseException
+import com.yunx.app.data.network.video.VideoParseResult
+import com.yunx.app.data.network.video.userMessage
 import com.yunx.app.data.update.UpdateChecker
 import com.yunx.app.data.repository.BaiduAccountRepository
 import com.yunx.app.data.repository.BaiduResolveRepository
@@ -57,7 +66,12 @@ import com.yunx.app.data.repository.UCAccountRepository
 import com.yunx.app.data.repository.UCResolveRepository
 import com.yunx.app.data.repository.XunleiAccountRepository
 import com.yunx.app.data.repository.XunleiResolveRepository
+import com.yunx.app.data.repository.VideoParseRepository
 import com.yunx.app.ui.SnackbarController
+import com.yunx.app.ui.preview.PreviewKind
+import com.yunx.app.ui.preview.PreviewLauncher
+import com.yunx.app.ui.preview.PreviewMedia
+import com.yunx.app.ui.preview.PreviewTypes
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
@@ -71,6 +85,9 @@ sealed interface ResolveUiState {
     data object Loading : ResolveUiState
     data class Detail(val session: ShareSession, val files: List<ShareFile>) : ResolveUiState
     data class Error(val message: String) : ResolveUiState
+
+    /** 视频解析结果（抖音/小红书/快手/微博/AcFun/B站/Pixiv，与网盘流程互不干扰） */
+    data class Video(val result: VideoParseResult) : ResolveUiState
 }
 
 /**
@@ -109,7 +126,25 @@ class ResolveViewModel(
      * true = 夸克免转存（直接换直链，不写入网盘，默认）；false = 先转存到临时目录再取链。
      * 用 lambda 而不是构造时取值，设置页改了立即生效。
      */
-    private val noSaveDownloadProvider: () -> Boolean = { true }
+    private val noSaveDownloadProvider: () -> Boolean = { true },
+    /**
+     * 多账号下载（实验性 C1）开关：由上层从 SettingsRepository 注入，改设置即时生效。
+     * 开启后批量下载会按文件轮换该网盘的不同账号取链，绕开单账号的并发数 / 限速
+     * （每个文件仍只用一个账号下载），见 [credentialRotation]。
+     */
+    private val multiAccountDownloadProvider: () -> Boolean = { false },
+    /**
+     * 单文件多源分片（实验性 C2）开关：由上层从 SettingsRepository 注入
+     * （工厂侧用 `multiSourceActive()` 判断，已保证 C2 生效时 C1 也开着）。
+     * 开启后同一个文件用多个账号各取一条直链，分片轮流交给不同直链下载，见 [fetchMultiSources]。
+     */
+    private val multiSourceDownloadProvider: () -> Boolean = { false },
+    /**
+     * 视频解析仓库（抖音/小红书/快手/微博/AcFun/B站/Pixiv）。
+     * null = 视频解析不可用（仅测试或未注入时）：解析入口会原样退回网盘/GitHub 流程。
+     * 放在构造最后并带默认值，避免破坏既有构造点与测试。
+     */
+    private val videoParseRepository: VideoParseRepository? = null
 ) : ViewModel() {
 
     var uiState by mutableStateOf<ResolveUiState>(ResolveUiState.Idle)
@@ -126,6 +161,13 @@ class ResolveViewModel(
 
     var downloadLink by mutableStateOf<DownloadLink?>(null)
         private set
+
+    /**
+     * 单文件多源分片（实验性 C2）预取的备选直链（直链 + 该账号凭证）。
+     * 与 [downloadLink] 在同一时刻取回、由紧接着的那次 [startDownload] 消费后清空 ——
+     * 直链签名有时效，不能等用户点「下载」时再去取。
+     */
+    private var pendingAltLinks: List<Pair<DownloadLink, String>> = emptyList()
 
     var downloadError by mutableStateOf<String?>(null)
     private set
@@ -530,6 +572,8 @@ class ResolveViewModel(
                     return@launch
                 }
                 var okCount = 0
+                var failCount = 0
+                var firstFailReason: String? = null
                 var interrupted = false
                 for ((index, task) in tasks.withIndex()) {
                     // 用户点击「中断」：停止剩余项，已入队的任务保留下载
@@ -548,15 +592,29 @@ class ResolveViewModel(
                         } else {
                             resolveShareLink(currentRepo(), s, file, quarkCred)
                         }
-                        linkResult.getOrNull()?.let { link ->
-                            // 文件夹内文件用相对路径（保持目录结构）；根目录文件用取链返回的文件名
-                            enqueueDownload(link, quarkCred, if (relPath.isBlank()) link.filename else relPath)
-                            okCount++
-                        }
+                        // ★ 取链失败必须抛出（而不是 getOrNull() 后什么都不做）：批量下载里静默跳过会
+                        //   表现为「整个文件夹只加入了几个文件，其余像没发生一样」，用户只会看到下载目录里
+                        //   少文件 / 混着上一次的残留，根本不知道是失败了
+                        val link = linkResult.getOrNull()
+                            ?: throw IllegalStateException(linkResult.exceptionOrNull()?.message ?: "未获取到下载直链")
+                        // 文件夹内文件用相对路径（保持目录结构）；根目录文件用取链返回的文件名
+                        enqueueDownload(link, quarkCred, if (relPath.isBlank()) link.filename else relPath)
+                        okCount++
+                    }.onFailure { e ->
+                        // 协程取消不是「失败」：原样抛出去，否则会被记成一条假的失败原因
+                        if (e is kotlinx.coroutines.CancellationException) throw e
+                        failCount++
+                        val reason = e.message ?: e.javaClass.simpleName
+                        if (firstFailReason == null) firstFailReason = reason
+                        android.util.Log.w("YunX-Resolve", "批量下载跳过 ${file.fname}：$reason")
                     }
                 }
                 if (!interrupted) {
-                    downloadError = if (okCount > 0) "已加入 $okCount 个下载任务" else "获取下载链接失败"
+                    downloadError = when {
+                        failCount == 0 -> if (okCount > 0) "已加入 $okCount 个下载任务" else "获取下载链接失败"
+                        else -> "已加入 $okCount 个，$failCount 个失败" +
+                            (firstFailReason?.let { "（原因：$it）" } ?: "")
+                    }
                     // 全部获取完再一次性切到下载页
                     if (okCount > 0) downloadStarted = true
                 }
@@ -845,6 +903,65 @@ class ResolveViewModel(
         else -> accountRepository.getAccount()?.cookie
     }
 
+    /**
+     * 多账号下载（实验性 C1）：本次批量下载可以轮换使用的凭证列表（主账号在前）。
+     *
+     * ★ 只覆盖「取链接口按参数收凭证」的平台：夸克 / UC / 迅雷 / 百度 / 139 / 115 / 蓝奏云。
+     *   123 / 光鸭 / 蓝奏优享 的凭证由各自 ResolveRepository 内部的 provider 闭包绑定主账号
+     *   （那条链路还负责 token 过期自动刷新），要换账号得改整条 provider 接线，
+     *   本次不做 —— 它们退回单账号，行为与开启前一致。
+     *
+     * 关闭开关、平台只有一个账号、或游客链路时返回原来那一条。
+     */
+    private suspend fun credentialRotation(fallback: String): List<String> {
+        if (!multiAccountDownloadProvider()) return listOf(fallback)
+        val credentials = when (currentPlatform) {
+            SharePlatform.QUARK -> accountRepository.allCredentials()
+            SharePlatform.UC -> ucAccountRepository.allCredentials()
+            SharePlatform.XUNLEI -> xunleiAccountRepository.allCredentials()
+            SharePlatform.BAIDU -> baiduAccountRepository.allCredentials()
+            SharePlatform.C139 -> c139AccountRepository.allCredentials()
+            SharePlatform.PAN115 -> pan115AccountRepository.allCredentials()
+            SharePlatform.LANZOU -> lanzouAccountRepository.allCredentials()
+            else -> emptyList()
+        }.filter { it.isNotBlank() }
+        return credentials.ifEmpty { listOf(fallback) }
+    }
+
+    /**
+     * 单文件多源分片（实验性 C2）支持轮换的四个主流平台（用户指定）。
+     * 其余平台即使开着 C2 也退回单源：它们的取链要么走 provider 闭包（123/光鸭/蓝奏优享），
+     * 要么没有独立的账号维度可用。
+     */
+    private val multiSourcePlatforms = setOf(
+        SharePlatform.QUARK,
+        SharePlatform.UC,
+        SharePlatform.XUNLEI,
+        SharePlatform.BAIDU
+    )
+
+    /**
+     * 单文件多源分片（实验性 C2）：对同一个文件再用**其他账号**各取一条直链。
+     *
+     * 只在「C2 生效 + 平台受支持 + 确实还有第二个账号」时才返回非空；任一账号取链失败就跳过它
+     * （多源只是提速手段，少一条照样能把文件下完）。
+     * 返回「直链 + 该账号凭证」成对的数据：下载请求头必须按这个凭证配，不能配主账号的。
+     */
+    private suspend fun fetchAltLinks(
+        file: ShareFile,
+        primaryCredential: String
+    ): List<Pair<DownloadLink, String>> {
+        if (!multiSourceDownloadProvider() || currentPlatform !in multiSourcePlatforms) return emptyList()
+        val s = session ?: return emptyList()
+        return credentialRotation(primaryCredential)
+            .filter { it != primaryCredential }
+            .mapNotNull { credential ->
+                runCatching { resolveShareLink(currentRepo(), s, file, credential).getOrNull() }
+                    .getOrNull()
+                    ?.let { link -> link to credential }
+            }
+    }
+
     private fun currentRepo(): ShareResolveRepository = when (currentPlatform) {
         SharePlatform.UC -> ucResolveRepository
         SharePlatform.XUNLEI -> xunleiResolveRepository
@@ -886,6 +1003,134 @@ class ResolveViewModel(
         else -> "夸克网盘"
     }
 
+    // ---------- 视频解析（抖音/小红书/快手/微博/AcFun/B站/Pixiv） ----------
+
+    /**
+     * 视频解析入口：识别到视频链接就走视频流程，识别不到则原样退回网盘/GitHub 解析。
+     * 这样 UI 三条入口（手动输入 / 深链接 / 主页快捷方式）都只需无条件调用本方法。
+     *
+     * @param pwd 网盘分享的提取码：仅在回退到网盘流程时透传，视频流程不使用。
+     */
+    fun startVideoResolve(text: String, pwd: String? = null) {
+        val link = VideoLinkParser.parse(text)
+        val repo = videoParseRepository
+        // 识别不到视频链接 / 未注入视频仓库：退回原有网盘解析（startResolve 内部会先试 GitHub再试网盘）
+        if (link == null || repo == null) {
+            startResolve(text, pwd)
+            return
+        }
+        // 视频结果不涉及网盘会话与凭证，因此**不设置** currentPlatform（那是网盘枚举）。
+        // 需要展示「当前平台」文案时，UI 直接用 result.platform.displayName。
+        viewModelScope.launch {
+            uiState = ResolveUiState.Loading
+            try {
+                uiState = ResolveUiState.Video(repo.parse(link))
+            } catch (e: VideoParseException) {
+                uiState = ResolveUiState.Error(e.userMessage())
+            } catch (e: Exception) {
+                uiState = ResolveUiState.Error("解析失败，请稍后重试")
+            }
+        }
+    }
+
+    /**
+     * 下载单个视频媒体。
+     * HLS 无需特殊处理：[DownloadManager] 按 URL 是否含 `.m3u8` 自动走 HLS 路径。
+     */
+    fun downloadVideoMedia(media: VideoMedia) {
+        val result = (uiState as? ResolveUiState.Video)?.result ?: return
+        viewModelScope.launch {
+            val index = result.medias.indexOf(media).takeIf { it >= 0 }?.plus(1) ?: 1
+            try {
+                downloadManager.enqueue(
+                    url = media.url,
+                    fileName = media.fileName.ifBlank { videoMediaFileName(result.title, index, media.kind) },
+                    headers = media.headers,
+                    size = media.size,
+                    platform = DownloadPlatform.VIDEO,
+                    // B站 DASH 高清是音视频分离的两路流：带上音轨地址，由下载器下完两轨再合轨
+                    mergeAudioUrl = media.audioUrl,
+                    mergeAudioHeaders = media.audioHeaders
+                )
+                downloadStarted = true
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                downloadError = "加入下载任务失败，请稍后重试"
+            }
+        }
+    }
+
+    /**
+     * 一键下载当前视频结果里的全部媒体：逐个入队，结束后用 [downloadError] 给出结果提示
+     * （网盘批量下载同样用它当结果通道），入队成功则触发跳转到下载页。
+     */
+    fun downloadAllVideoMedia() {
+        val result = (uiState as? ResolveUiState.Video)?.result ?: return
+        downloadVideoMedias(result.medias)
+    }
+
+    /**
+     * 批量下载一组媒体（图集的「全部下载」/多选后的「下载所选」共用）。
+     *
+     * ★ **多张时文件名带「作品标题/」前缀**：下载页是按 `fileName` 里的 `/` 把任务收纳成**可折叠的
+     *   文件夹组**（就是网盘「整个文件夹下载」那一套机制，见 `DownloadScreen` 的 `folderGroups`）。
+     *   于是图集批量下载在下载页是**一个分组**，而不是几十张散落各处的图片任务。
+     *   **单张不加前缀** —— 一个只有一张图的「文件夹」没有意义。
+     */
+    fun downloadVideoMedias(medias: List<VideoMedia>) {
+        val result = (uiState as? ResolveUiState.Video)?.result ?: return
+        if (medias.isEmpty()) return
+        val folder = if (medias.size > 1) DownloadPathPolicy.sanitizeName(result.title).take(40) else ""
+        viewModelScope.launch {
+            var okCount = 0
+            var failReason: String? = null
+            try {
+                medias.forEachIndexed { i, media ->
+                    // 序号只用于文件名兜底：优先用解析器给好的 fileName
+                    val index = result.medias.indexOf(media).takeIf { it >= 0 }?.plus(1) ?: (i + 1)
+                    val name = media.fileName.ifBlank {
+                        videoMediaFileName(result.title, index, media.kind)
+                    }
+                    downloadManager.enqueue(
+                        url = media.url,
+                        fileName = if (folder.isBlank()) name else "$folder/$name",
+                        headers = media.headers,
+                        size = media.size,
+                        platform = DownloadPlatform.VIDEO,
+                        // B站 DASH 分轨：音轨一起交给下载器合轨（与逐条下载保持一致，
+                        // 少了这个「全部下载」会下出一个没有声音的视频）
+                        mergeAudioUrl = media.audioUrl,
+                        mergeAudioHeaders = media.audioHeaders
+                    )
+                    okCount++
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                failReason = e.message
+            }
+            if (okCount > 0) {
+                downloadError = "已加入 $okCount 个下载任务"
+                downloadStarted = true
+            } else {
+                // 一个都没入队：把原因写出来，不要静默失败
+                downloadError = failReason?.takeIf { it.isNotBlank() } ?: "加入下载任务失败，请稍后重试"
+            }
+        }
+    }
+
+    /** 视频媒体文件名的兜底：`标题_序号.扩展名`（扩展名按媒体类型推断） */
+    private fun videoMediaFileName(title: String, index: Int, kind: VideoMediaKind): String {
+        val ext = when (kind) {
+            VideoMediaKind.VIDEO -> "mp4"
+            VideoMediaKind.IMAGE -> "jpg"
+            VideoMediaKind.AUDIO -> "mp3"
+        }
+        val base = title.ifBlank { "video" }.take(40)
+        return "${base}_${index}.$ext"
+    }
+
     /** 开始解析：链接 → token →（密码）→ 根目录列表 */
     fun startResolve(link: String, pwd: String?) {
         currentLink = link
@@ -900,23 +1145,28 @@ class ResolveViewModel(
         }
         viewModelScope.launch {
             uiState = ResolveUiState.Loading
-            // 迅雷中文口令（如「张三丰资源」）：不是分享链接的短中文文本 → 先用 shoulei 跳转接口
-            // 换成带提取码的分享链接，再按普通分享链接继续解析。口令是迅雷专有的输入形态，
-            // 其它平台没有对应形式，所以只在「不像任何分享链接」时尝试一次。
-            val koulingUrl = if (ShareLinkParser.parse(link) == null && XunleiKouling.looksLikeKouling(link)) {
-                val r = xunleiResolveRepository.resolveKouling(XunleiKouling.normalize(link))
-                r.exceptionOrNull()?.let { e ->
-                    uiState = ResolveUiState.Error(e.message ?: "口令解析失败")
-                    return@launch
+            // 中文口令兜底（既不是分享链接、也不是 GitHub 链接）：**先迅雷，迅雷没给出可用链接再问星海**。
+            // ① 迅雷口令（如「张三丰资源」）：口令是「分享链接 + 提取码」的打包形式，打 shoulei 跳转接口换链接；
+            // ② 星海（夸克/UC 中文口令）：换回 pwd_id，再合成分享链接，后续提取码/登录/列表/取链全走既有链路。
+            // 两个服务都用同一段原文，成功即止；都失败时把原因带出去（而不是只丢一句「无法识别」）。
+            var effectiveLink = link
+            var commandError: String? = null
+            if (ShareLinkParser.parse(link) == null) {
+                if (XunleiKouling.looksLikeKouling(link)) {
+                    xunleiResolveRepository.resolveKouling(XunleiKouling.normalize(link))
+                        .onSuccess { effectiveLink = it }
+                        .onFailure { commandError = it.message }
                 }
-                r.getOrNull()
-            } else {
-                null
+                if (ShareLinkParser.parse(effectiveLink) == null && StarSeaApi.looksLikeCommand(link)) {
+                    StarSeaApi.resolveToShareLink(link)
+                        .onSuccess { effectiveLink = it }
+                        .onFailure { commandError = it.message }
+                }
             }
-            val effectiveLink = koulingUrl ?: link
             val parsed = ShareLinkParser.parse(effectiveLink)
             if (parsed == null) {
-                uiState = ResolveUiState.Error("无法识别分享链接")
+                // 两个口令服务都给不出结果时，用更靠后那次（星海）的原因——它对夸克/UC 口令最准
+                uiState = ResolveUiState.Error(commandError ?: "无法识别分享链接")
                 return@launch
             }
             // 口令已换成真实分享链接：收藏 / 复制 / 重新解析都用它，而不是原始口令
@@ -1644,6 +1894,8 @@ class ResolveViewModel(
                     currentRepo().getGuestShareDownloadLink(s, file)
                         .onSuccess { downloadLink = it }
                         .onFailure { downloadError = it.message ?: "获取下载链接失败" }
+                    // 游客链路只有一个身份，不存在多源
+                    pendingAltLinks = emptyList()
                     return@launch
                 }
                 // 夸克/UC 共用 __puus：取链前确保新鲜（直链签名绑定取链时刻的 Cookie）
@@ -1654,7 +1906,12 @@ class ResolveViewModel(
                 }
                 // 优先免转存（不往用户网盘里转存）：夸克失败时自动回退到转存取链
                 resolveShareLink(currentRepo(), s, file, quarkCred)
-                    .onSuccess { downloadLink = it }
+                    .onSuccess { link ->
+                        downloadLink = link
+                        // 单文件多源分片（实验性 C2）：同一时刻再用其他账号各取一条直链，
+                        // 下载时由内置分片下载器按分片轮流使用（见 DownloadManager 的「多源分片」）
+                        pendingAltLinks = fetchAltLinks(file, quarkCred)
+                    }
                     .onFailure { downloadError = it.message ?: "获取下载链接失败" }
             } finally {
                 isFetchingDownloadLink = false
@@ -1665,6 +1922,8 @@ class ResolveViewModel(
     fun dismissDownloadDialog() {
         val link = downloadLink
         downloadLink = null
+        // 弹窗没开始下载就关掉：预取的多源直链一并作废（下次取链会重新预取，避免用到过期直链）
+        pendingAltLinks = emptyList()
         // 弹窗被关闭（用户点关闭，未开始下载）：清理当前平台的云端临时转存，避免残留
         if (link?.cleanupDirFid != null) {
             viewModelScope.launch {
@@ -1677,13 +1936,210 @@ class ResolveViewModel(
     }
 
     /**
+     * 在线预览网盘文件：先取直链（与 [fetchDownloadLink] 同一套分支），再把直链 + 按平台组装好的
+     * 请求头交给全局预览页 [PreviewLauncher]。
+     *
+     * ★ 为什么不复用 [fetchDownloadLink]：那条路径会把直链写进 [downloadLink] 并弹出「开始下载」弹窗，
+     *   那是**下载入口**的交互；预览只需要一次性的直链，不能顺带弹下载弹窗，所以这里独立走一遍取链。
+     *   但复用同一套加载态（[isFetchingDownloadLink]，由 ResolveScreen 显示加载弹窗）与错误反馈
+     *   （[downloadError]），取链失败绝不静默。
+     *
+     * GitHub 的「直链」是按仓库路径构造出来的下载地址，属于仓库浏览流程，不提供在线预览。
+     */
+    fun openPreview(file: ShareFile) {
+        if (currentPlatform == SharePlatform.GITHUB) return
+        // 入口可见性已由 PreviewTypes 判断，这里再挡一次：不可预览的类型（压缩包/未知）不进取链流程
+        val kind = PreviewTypes.kindOf(file.fname) ?: return
+        val title = file.fname.ifBlank { "在线预览" }
+        viewModelScope.launch {
+            downloadError = null
+            isFetchingDownloadLink = true
+            try {
+                val s = session
+                if (s == null) {
+                    downloadError = "请先解析分享"
+                    return@launch
+                }
+                val credential = currentCredential().orEmpty()
+                val link: DownloadLink
+                val effectiveCredential: String
+                if (credential.isBlank()) {
+                    // 游客态：与 fetchDownloadLink 一致，仅夸克/UC/光鸭/蓝奏支持匿名取链，其余平台必须登录
+                    if (!supportsGuestDownload()) {
+                        downloadError = "下载需要先登录${platformName()}（未登录仅能浏览文件列表）"
+                        return@launch
+                    }
+                    link = currentRepo().getGuestShareDownloadLink(s, file).getOrElse {
+                        downloadError = it.message ?: "获取下载链接失败"
+                        return@launch
+                    }
+                    // 游客链路只有一个身份：请求头走「游客态 Cookie」分支（guestCookie 非空）
+                    effectiveCredential = ""
+                } else {
+                    // 夸克/UC 共用 __puus：取链前确保新鲜（直链签名绑定取链时刻的 Cookie），与 fetchDownloadLink 一致
+                    val quarkCred = when (currentPlatform) {
+                        SharePlatform.QUARK -> accountRepository.getFreshCookie() ?: credential
+                        SharePlatform.UC -> ucAccountRepository.getFreshCookie() ?: credential
+                        else -> credential
+                    }
+                    link = resolveShareLink(currentRepo(), s, file, quarkCred).getOrElse {
+                        downloadError = it.message ?: "获取下载链接失败"
+                        return@launch
+                    }
+                    effectiveCredential = effectiveDownloadCredential(credential)
+                }
+                // 与下载完全同一份请求头：预览页的图片加载器/播放器都要用它，否则平台 403
+                val headers = buildDownloadHeaders(
+                    platform = currentPlatform,
+                    credential = credential,
+                    effectiveCredential = effectiveCredential,
+                    link = link,
+                    guestCookie = link.guestCookie
+                )
+                if (kind == PreviewKind.TEXT) {
+                    // 文本按文本读取（Markdown 是否渲染由预览页决定）；url 用直链即可
+                    PreviewLauncher.openText(
+                        url = link.downloadUrl,
+                        fileName = file.fname,
+                        headers = headers,
+                        title = title
+                    )
+                } else {
+                    PreviewLauncher.openMedia(
+                        items = listOf(
+                            PreviewMedia(
+                                url = link.downloadUrl,
+                                kind = kind,
+                                title = title,
+                                headers = headers,
+                                isHls = link.isHls
+                            )
+                        ),
+                        title = title
+                    )
+                }
+            } finally {
+                isFetchingDownloadLink = false
+            }
+        }
+    }
+
+    /**
+     * 取链 → 请求头这条链路上共用的「已刷新凭证」。
+     *
+     * 夸克/UC 共用 __puus：直链签名绑定取链那一刻的 Cookie，请求头里必须用刷新后的那一份，
+     * 否则 CDN 直接 412/403（AlistGo/alist#830 类缺陷）。[QuarkAccountRepository.refreshIfPrimary]
+     * 只在「传进来的就是主账号那一份」时才刷新（等价于 getFreshCookie），多账号下载轮换到非主账号时
+     * 保留它自己的 Cookie（换成主账号的会让直链与身份配成两个账号）。其余平台凭证不由 __puus 决定，原样返回。
+     */
+    private suspend fun effectiveDownloadCredential(credential: String): String = when (currentPlatform) {
+        SharePlatform.QUARK -> accountRepository.refreshIfPrimary(credential)
+        SharePlatform.UC -> ucAccountRepository.refreshIfPrimary(credential)
+        else -> credential
+    }
+
+    /**
+     * 按平台组装直链请求头 —— **下载（[enqueueDownload]）与在线预览（[openPreview]）共用同一份**。
+     *
+     * ★ 抽出来是为了「改一处两处生效」：这些头（Cookie / UA / Referer / Origin）少一个，
+     *   下载会被 CDN 拒（403/412），预览会图裂/黑屏，两边规则必须永远一致。
+     *
+     * @param credential 登录凭证原文（游客链路为空串）
+     * @param effectiveCredential [credential] 经 __puus 刷新后的值（见 [effectiveDownloadCredential]）
+     * @param guestCookie 游客态直链随取链响应下发的 Cookie（登录态为空串）
+     */
+    private fun buildDownloadHeaders(
+        platform: SharePlatform,
+        credential: String,
+        effectiveCredential: String,
+        link: DownloadLink,
+        guestCookie: String
+    ): Map<String, String> {
+        val isGuestLink = guestCookie.isNotBlank()
+        // 迅雷直链 URL 自带签名，无需 Cookie；夸克/UC/百度需 Cookie + UA；139 直链为 CDN 签名地址；123 直链需 Referer
+        // 115 直链需「登录 Cookie + 取链响应下发的 900 秒 CDN Cookie」双 Cookie（缺一即 CDN 403 no cookie value）
+        return when (platform) {
+            SharePlatform.XUNLEI -> mapOf("User-Agent" to XunleiConstants.APP_UA) // 迅雷直链必须用官方 app UA，浏览器 UA 会触发 CDN 降级（200整文件）
+            SharePlatform.BAIDU -> mapOf(
+                "Cookie" to credential,
+                "User-Agent" to BaiduConstants.UA_NETDISK
+            )
+            SharePlatform.C139 -> mapOf("User-Agent" to C139Constants.PC_UA)
+            // 115：CDN 同时校验登录 Cookie 与取链响应下发的 900 秒 CDN Cookie，
+            // 缺任一直接 403 no cookie value（文档 §4.3），因此两份 Cookie 拼接后一起发；
+            // UA 必须是客户端串（与取链一致），浏览器 UA 会被判「网页端」拒发大文件直链（抓包 bug/115/）
+            SharePlatform.PAN115 -> mapOf(
+                "Cookie" to Pan115Constants.mergeCookies(effectiveCredential, guestCookie),
+                "User-Agent" to Pan115Constants.CLIENT_UA,
+                "Referer" to Pan115Constants.DOWNLOAD_REFERER
+            )
+            // 123 分享/个人盘直链为 CDN 签名地址，下载必须带 Referer（文档 §5.3.1）
+            SharePlatform.PAN123 -> mapOf(
+                "User-Agent" to Pan123Constants.WEB_UA,
+                "Referer" to Pan123Constants.DOWNLOAD_REFERER
+            )
+            // 光鸭直链为签名 CDN 地址，下载带 UA + Referer，且不携带 Authorization/Cookie（文档 §5.6/§7.1）
+            SharePlatform.GUANGYA -> mapOf(
+                "User-Agent" to GuangYaConstants.WEB_UA,
+                "Referer" to GuangYaConstants.DOWNLOAD_REFERER
+            )
+            // 蓝奏优享直链为 CDN 地址，下载带 UA + Referer + Origin，不带 Cookie（文档 §4.1）
+            SharePlatform.ILANZOU -> mapOf(
+                "User-Agent" to ILanzouConstants.WEB_UA,
+                "Referer" to ILanzouConstants.DOWNLOAD_REFERER,
+                "Origin" to ILanzouConstants.WEB_SITE
+            )
+            // 蓝奏云下载节点要求 Referer 为节点 origin，并注入 down_ip=1 Cookie（文档 §A4）
+            SharePlatform.LANZOU -> {
+                val lanzouOrigin = runCatching { java.net.URI(link.downloadUrl) }.getOrNull()
+                    ?.let { "${it.scheme}://${it.host}" } ?: "https://pan.lanzoui.com"
+                mapOf(
+                    "User-Agent" to LanzouConstants.WEB_UA,
+                    "Referer" to "$lanzouOrigin/",
+                    "Cookie" to LanzouConstants.DOWN_IP_COOKIE
+                )
+            }
+            // UC：OSS 直链按 Referer 档位限速（缺 Referer 被 Callback 限到 ~100 KB/s），
+            // 补官方 Web 客户端同款 Referer/Origin 即满速
+            SharePlatform.UC -> if (isGuestLink) mapOf(
+                // 游客链路换 uc-cloud-drive 客户端 UA + Sec-Ch-Ua（参考实现的游客请求同款头），Referer 仍不可少
+                "Cookie" to guestCookie,
+                "User-Agent" to UCConstants.GUEST_UA,
+                "Sec-Ch-Ua" to UCConstants.GUEST_SEC_CH_UA,
+                "Referer" to UCConstants.DOWNLOAD_REFERER,
+                "Origin" to UCConstants.WEB_ORIGIN
+            ) else mapOf(
+                "Cookie" to credential,
+                "User-Agent" to UCConstants.USER_AGENT,
+                "Referer" to UCConstants.DOWNLOAD_REFERER,
+                "Origin" to UCConstants.WEB_ORIGIN
+            )
+            // 夸克（以及其余未单独列出的平台）：防盗链需固定 Referer（对齐 AList quark_uc）
+            else -> if (isGuestLink) mapOf(
+                "Cookie" to guestCookie,
+                "User-Agent" to QuarkConstants.API_USER_AGENT,
+                "Referer" to QuarkConstants.DOWNLOAD_REFERER
+            ) else mapOf(
+                "Cookie" to effectiveCredential,
+                "User-Agent" to QuarkConstants.API_USER_AGENT,
+                "Referer" to QuarkConstants.DOWNLOAD_REFERER
+            )
+        }
+    }
+
+    /**
      * 将直链加入下载队列（携带对应平台凭证与 UA；夸克直链做 CDN 节点优选）。
      * 不触发切页 —— 与 startDownload 的区别：批量下载全部入队后才统一切到下载页。
      */
     private suspend fun enqueueDownload(
         link: DownloadLink,
         credential: String,
-        fileName: String = link.filename
+        fileName: String = link.filename,
+        /**
+         * 单文件多源分片（实验性 C2）的备选直链（其他账号的直链 + 该账号凭证）；空 = 单源。
+         * 由 [fetchAltLinks] 预取，来自取链弹窗那一次交互，见 [pendingAltLinks]。
+         */
+        altLinks: List<Pair<DownloadLink, String>> = emptyList()
     ) {
         val isUC = currentPlatform == SharePlatform.UC
         val isXunlei = currentPlatform == SharePlatform.XUNLEI
@@ -1709,85 +2165,13 @@ class ResolveViewModel(
             else -> DownloadPlatform.QUARK
         }
         // 【关键修复】夸克/UC 共用 __puus：取链与下载必须用同一份已刷新 Cookie（AlistGo/alist#830 类缺陷）
-        // getFreshCookie 有 90 分钟间隔保护，与取链处调用幂等，得到的是同一份。
-        val effectiveCredential = when (currentPlatform) {
-            SharePlatform.QUARK -> accountRepository.getFreshCookie() ?: credential
-            SharePlatform.UC -> ucAccountRepository.getFreshCookie() ?: credential
-            else -> credential
-        }
+        val effectiveCredential = effectiveDownloadCredential(credential)
         // 游客直链（夸克/UC 小文件）：只有服务端随取链响应下发的游客态 __pugs，没有登录 Cookie。
         // 夸克缺它 CDN 直接 412；UC 缺它 CDN 403（RequestDeniedByCallback: require login）
         val guestCookie = link.guestCookie
         val isGuestLink = guestCookie.isNotBlank()
-        // 迅雷直链 URL 自带签名，无需 Cookie；夸克/UC/百度需 Cookie + UA；139 直链为 CDN 签名地址；123 直链需 Referer
-        // 115 直链需「登录 Cookie + 取链响应下发的 900 秒 CDN Cookie」双 Cookie（缺一即 CDN 403 no cookie value）
-        val headers = when {
-            isXunlei -> mapOf("User-Agent" to XunleiConstants.APP_UA) // 迅雷直链必须用官方 app UA，浏览器 UA 会触发 CDN 降级（200整文件）
-            isBaidu -> mapOf(
-                "Cookie" to credential,
-                "User-Agent" to BaiduConstants.UA_NETDISK
-            )
-            isC139 -> mapOf("User-Agent" to C139Constants.PC_UA)
-            // 115：CDN 同时校验登录 Cookie 与取链响应下发的 900 秒 CDN Cookie，
-            // 缺任一直接 403 no cookie value（文档 §4.3），因此两份 Cookie 拼接后一起发；
-            // UA 必须是客户端串（与取链一致），浏览器 UA 会被判「网页端」拒发大文件直链（抓包 bug/115/）
-            isPan115 -> mapOf(
-                "Cookie" to Pan115Constants.mergeCookies(effectiveCredential, guestCookie),
-                "User-Agent" to Pan115Constants.CLIENT_UA,
-                "Referer" to Pan115Constants.DOWNLOAD_REFERER
-            )
-            // 123 分享/个人盘直链为 CDN 签名地址，下载必须带 Referer（文档 §5.3.1）
-            isPan123 -> mapOf(
-                "User-Agent" to Pan123Constants.WEB_UA,
-                "Referer" to Pan123Constants.DOWNLOAD_REFERER
-            )
-            // 光鸭直链为签名 CDN 地址，下载带 UA + Referer，且不携带 Authorization/Cookie（文档 §5.6/§7.1）
-            isGuangYa -> mapOf(
-                "User-Agent" to GuangYaConstants.WEB_UA,
-                "Referer" to GuangYaConstants.DOWNLOAD_REFERER
-            )
-            // 蓝奏优享直链为 CDN 地址，下载带 UA + Referer + Origin，不带 Cookie（文档 §4.1）
-            isILanzou -> mapOf(
-                "User-Agent" to ILanzouConstants.WEB_UA,
-                "Referer" to ILanzouConstants.DOWNLOAD_REFERER,
-                "Origin" to ILanzouConstants.WEB_SITE
-            )
-            // 蓝奏云下载节点要求 Referer 为节点 origin，并注入 down_ip=1 Cookie（文档 §A4）
-            isLanzou -> {
-                val lanzouOrigin = runCatching { java.net.URI(link.downloadUrl) }.getOrNull()
-                    ?.let { "${it.scheme}://${it.host}" } ?: "https://pan.lanzoui.com"
-                mapOf(
-                    "User-Agent" to LanzouConstants.WEB_UA,
-                    "Referer" to "$lanzouOrigin/",
-                    "Cookie" to LanzouConstants.DOWN_IP_COOKIE
-                )
-            }
-            // UC：OSS 直链按 Referer 档位限速（缺 Referer 被 Callback 限到 ~100 KB/s），
-            // 补官方 Web 客户端同款 Referer/Origin 即满速
-            isUC -> if (isGuestLink) mapOf(
-                // 游客链路换 uc-cloud-drive 客户端 UA + Sec-Ch-Ua（参考实现的游客请求同款头），Referer 仍不可少
-                "Cookie" to guestCookie,
-                "User-Agent" to UCConstants.GUEST_UA,
-                "Sec-Ch-Ua" to UCConstants.GUEST_SEC_CH_UA,
-                "Referer" to UCConstants.DOWNLOAD_REFERER,
-                "Origin" to UCConstants.WEB_ORIGIN
-            ) else mapOf(
-                "Cookie" to credential,
-                "User-Agent" to UCConstants.USER_AGENT,
-                "Referer" to UCConstants.DOWNLOAD_REFERER,
-                "Origin" to UCConstants.WEB_ORIGIN
-            )
-            // 夸克：防盗链需固定 Referer（对齐 AList quark_uc）
-            else -> if (isGuestLink) mapOf(
-                "Cookie" to guestCookie,
-                "User-Agent" to QuarkConstants.API_USER_AGENT,
-                "Referer" to QuarkConstants.DOWNLOAD_REFERER
-            ) else mapOf(
-                "Cookie" to effectiveCredential,
-                "User-Agent" to QuarkConstants.API_USER_AGENT,
-                "Referer" to QuarkConstants.DOWNLOAD_REFERER
-            )
-        }
+        // 请求头组装见 buildDownloadHeaders：下载与在线预览共用同一份规则（避免两处漂移）
+        val headers = buildDownloadHeaders(currentPlatform, credential, effectiveCredential, link, guestCookie)
         // 夸克直链：原样使用（关闭节点改写/探测，避免消耗直链额度与节点签名 412）
         val effectiveUrl = if (isQuark) {
             QuarkCdn.fastest(link.downloadUrl, if (isGuestLink) guestCookie else effectiveCredential)
@@ -1797,12 +2181,31 @@ class ResolveViewModel(
         // 入队前先记住「哪个平台的仓库 + 哪份凭证」：下载完成时用户可能已经切到别的分享页
         val cleanupRepo = currentRepo()
         val cleanupCredential = credential
+        // 单文件多源分片（实验性 C2）：备选源 = 其他账号的直链 + 「主源那一套请求头、只换 Cookie」。
+        // ★ 受支持的四个平台（夸克 / UC / 迅雷 / 百度）的下载请求头差异只有 Cookie 一项
+        //   （迅雷直链头里根本没有 Cookie，直链自带签名），所以这里沿用主源头再换 Cookie 即可；
+        //   将来若给 115（双 Cookie）之类开多源，必须重新评估这一处。
+        val altSources = altLinks.map { (altLink, altCred) ->
+            val url = if (isQuark) {
+                // 夸克每条备选直链同样做一次 CDN 节点优选（原样直链容易 412）
+                QuarkCdn.fastest(altLink.downloadUrl, altCred)
+            } else {
+                altLink.downloadUrl
+            }
+            val headersForAlt = if (headers.containsKey("Cookie")) {
+                headers + ("Cookie" to altCred)
+            } else {
+                headers
+            }
+            DownloadSource(url, headersForAlt)
+        }
         downloadManager.enqueue(
             url = effectiveUrl,
             fileName = fileName,
             headers = headers,
             size = link.size,
             platform = platform,
+            altSources = altSources,
             sourceFileId = link.fid,
             sourceType = com.yunx.app.data.download.DownloadSourceType.SHARE
         ) {
@@ -1839,7 +2242,10 @@ class ResolveViewModel(
                 downloadError = "下载需要先登录${platformName()}（未登录仅能浏览文件列表）"
                 return@launch
             }
-            enqueueDownload(link, credential)
+            // 单文件多源分片（实验性 C2）：把取链时预取的备选源一起交给下载器；用完即弃
+            // （下次打开取链弹窗会重新预取，避免用到过期直链）
+            enqueueDownload(link, credential, altLinks = pendingAltLinks)
+            pendingAltLinks = emptyList()
             downloadStarted = true
         }
     }
@@ -1884,7 +2290,11 @@ class ResolveViewModel(
         private val bookmarkDao: BookmarkDao,
         private val githubApi: GitHubApi? = null,
         private val mirrorPrefixProvider: () -> String = { UpdateChecker.MIRROR_PREFIX },
-        private val noSaveDownloadProvider: () -> Boolean = { true }
+        private val noSaveDownloadProvider: () -> Boolean = { true },
+        private val multiAccountDownloadProvider: () -> Boolean = { false },
+        private val multiSourceDownloadProvider: () -> Boolean = { false },
+        /** 视频解析仓库；null 时视频解析不可用（入口自动回退网盘/GitHub 流程） */
+        private val videoParseRepository: VideoParseRepository? = null
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -1904,7 +2314,10 @@ class ResolveViewModel(
                 bookmarkDao,
                 githubApi,
                 mirrorPrefixProvider,
-                noSaveDownloadProvider
+                noSaveDownloadProvider,
+                multiAccountDownloadProvider,
+                multiSourceDownloadProvider,
+                videoParseRepository
             ) as T
         }
     }

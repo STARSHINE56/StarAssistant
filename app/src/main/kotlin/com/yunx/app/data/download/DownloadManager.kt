@@ -38,7 +38,11 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import com.yunx.app.data.network.HttpClients
 import java.io.File
+import java.io.FileInputStream
+import java.security.DigestOutputStream
+import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
@@ -46,7 +50,10 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import org.json.JSONArray
 import org.json.JSONObject
+import okhttp3.Headers
+import okhttp3.Request
 import kotlin.coroutines.coroutineContext
 import kotlin.math.min
 
@@ -57,6 +64,45 @@ data class DownloadStats(
     val chunkCount: Int = 1,      // 分片（线程）数
     val mergePercent: Int = -1,
     val phase: String = ""
+)
+
+/**
+ * 单个「在飞分片」的调试快照（下载调试页用）。
+ * 一路在飞分片就对应一个正在干活的 worker，所以这张表就是「每个线程此刻在干什么」。
+ * [key] 形如 `part_<片号>`（主池）/ `seg@<起点>`（弹性区）/ `retry@<起点>`（修复重试）。
+ */
+data class ChunkDebug(
+    val key: String,
+    val start: Long,
+    val size: Long,
+    /** 负责这一片的 worker 序号（0 起）：`worker #k`，方便看「哪个线程在干什么」 */
+    val worker: Int,
+    val received: Long,
+    /** 看门狗上一次采样算出的瞬时速度（字节/秒） */
+    val bps: Long,
+    val elapsedMs: Long,
+    /** 已被「慢连接抢占」换连接的次数 */
+    val preemptCount: Int,
+    /** 是否已置位抢占标志（下一次检查点会断开换连接） */
+    val preempting: Boolean
+)
+
+/** 下载引擎的全局资源快照（下载调试页的「全局资源」面板用） */
+data class DownloadResourceDebug(
+    /** 全进程在飞分片配额（MAX_INFLIGHT_CHUNKS） */
+    val inflightCap: Int,
+    /** 当前已占用的在飞槽位 */
+    val inflightUsed: Int,
+    /** 正在跑的任务协程数 */
+    val activeTasks: Int,
+    val heapUsed: Long,
+    val heapMax: Long,
+    /** 分片 IO 线程池当前线程数 */
+    val poolSize: Int,
+    /** 分片 IO 线程池正在执行任务的线程数 */
+    val poolActive: Int,
+    /** 分片 IO 线程池等待队列长度（>0 说明有 worker 在排队等线程，常因并发开得比线程池大） */
+    val poolQueue: Int
 )
 
 private const val TAG = "YunX-DL"
@@ -104,7 +150,7 @@ private const val JOB_EXIT_WAIT_MS = 10_000L
  * 每 PREEMPT_TICK_MS 刷新一次瞬时速度（[lastBps]）；[preempt] / [preemptCount] / [lastPreemptAtMs]
  * 决定该路是否换连接续传——删掉它们收尾长尾就会回来（见 PREEMPT_MIN_BPS 注释）。
  */
-private class InflightChunk(val start: Long, val size: Long) {
+private class InflightChunk(val start: Long, val size: Long, val worker: Int) {
     val bytes = AtomicLong(0L)
     val startedAtMs = System.currentTimeMillis()
 
@@ -297,7 +343,7 @@ class DownloadManager(
         val floor = maxOf(PREEMPT_MIN_BPS, median / 2)
         val now = System.currentTimeMillis()
         var taken = 0
-        for (d in diag.values.sortedBy { it.lastBps }) {
+        for ((chunkKey, d) in diag.entries.sortedBy { it.value.lastBps }) {
             if (taken >= PREEMPT_PER_TICK) break
             if (d.preemptCount >= PREEMPT_MAX) continue
             if (now - d.lastPreemptAtMs < PREEMPT_COOLDOWN_MS) continue
@@ -314,8 +360,13 @@ class DownloadManager(
             d.lastPreemptAtMs = now
             d.preempt.set(true)
             taken++
-            Log.w(TAG, "runTask: id=$id 抢占慢连接 起点=${d.start} 块=${diagSize(d.size)} 已收=${diagSize(d.bytes.get())} " +
-                "瞬时=${formatSpeed(d.lastBps)} 阈值=${formatSpeed(floor)} 第${d.preemptCount}/$PREEMPT_MAX 次（换连接续传）")
+            Log.w(TAG, "runTask: id=$id 抢占慢连接 分片=$chunkKey(worker#${d.worker}) 起点=${d.start} 块=${diagSize(d.size)} 已收=${diagSize(d.bytes.get())} " +
+                "瞬时=${diagSpeed(d.lastBps)} 阈值=${diagSpeed(floor)} 第${d.preemptCount}/$PREEMPT_MAX 次（换连接续传）")
+            DownloadDebugLog.record(
+                id, "抢占慢连接",
+                "分片=$chunkKey worker#${d.worker} 起点=${d.start} 块=${diagSize(d.size)} 已收=${diagSize(d.bytes.get())} " +
+                    "瞬时=${diagSpeed(d.lastBps)} 阈值=${diagSpeed(floor)} 第${d.preemptCount}/$PREEMPT_MAX 次"
+            )
         }
     }
 
@@ -326,6 +377,13 @@ class DownloadManager(
         bytes >= 1024L -> String.format("%.1fKB", bytes / 1024.0)
         else -> "${bytes}B"
     }
+
+    /**
+     * 速度转可读文本（调试日志用）：与 [formatSpeed] 的区别是**取不到就写「未知」而不是空串**——
+     * 看门狗刚判定慢连接时 lastBps 可能还是 0，留空会让日志出现 `瞬时=` 这种没有值的字段。
+     */
+    private fun diagSpeed(bytesPerSec: Long): String =
+        if (bytesPerSec > 0) formatSpeed(bytesPerSec) else "未知"
 
     /**
      * 进度落盘节流：多 worker 并发回调下，每 progressPersistIntervalMs 最多写一次 DB。
@@ -354,6 +412,7 @@ class DownloadManager(
         val start = taskStartTimes.remove(id) ?: 0L
         val elapsedSec = ((System.currentTimeMillis() - start) / 1000.0).coerceAtLeast(1.0)
         val avg = if (total > 0 && elapsedSec > 0) (total / elapsedSec).toLong() else 0L
+        DownloadDebugLog.record(id, "完成", "总大小=$total 本段耗时=${elapsedSec.toInt()}s 平均速度=$avg B/s 保存=$savedPath")
         DiagnosticLog.dbOp("download_task", "complete", rowsOf = { -1 }) {
             dao.complete(id, DownloadTaskEntity.STATUS_COMPLETED, savedPath, avg)
         }
@@ -364,6 +423,12 @@ class DownloadManager(
 
     /** 任务请求头（Cookie/UA），暂停后恢复仍需使用 */
     private val taskHeaders = ConcurrentHashMap<Long, Map<String, String>>()
+
+    /**
+     * 单文件多源分片（实验性 C2）的备选源：同一文件其他账号的直链 + 各自请求头。
+     * 与 [taskHeaders] 同寿命（入队写入、任务终态清理），重启后从 download_task 里恢复。
+     */
+    private val taskAltSources = ConcurrentHashMap<Long, List<DownloadSource>>()
 
     /** 已知文件大小（API 返回，避免探测失败）；-1 表示未知 */
     private val taskSizes = ConcurrentHashMap<Long, Long>()
@@ -376,6 +441,91 @@ class DownloadManager(
 
     /** 任务下载完成后的清理回调（如删除网盘临时转存文件；下载成功后才触发） */
     private val taskCallbacks = ConcurrentHashMap<Long, suspend () -> Unit>()
+
+    /**
+     * DASH 合轨任务的**音轨请求头**：与 [taskHeaders] 同寿命（入队写入、终态清理），
+     * 重启恢复时从 `download_task.mergeAudioHeadersJson` 读回（见 [loadPersistedMergeAudioHeaders]）。
+     */
+    private val taskMergeAudioHeaders = ConcurrentHashMap<Long, Map<String, String>>()
+
+    /**
+     * 各任务当前的在飞分片表（taskId → 该任务 runTask 里的在飞表）。
+     *
+     * ★ 只为「下载调试」按需读取，不参与任何下载逻辑：`runTask` 建表时登记、`start` 的 finally 里移除。
+     *   用拉取式快照（[chunkDebugSnapshot]）而不是定时推送，是为了让没打开调试页时**零额外开销**。
+     */
+    private val activeChunkMaps = ConcurrentHashMap<Long, ConcurrentHashMap<String, InflightChunk>>()
+
+    /**
+     * 分片级校验：taskId → 每个分片**下载时**算出的 SHA-256（文件名 → 十六进制）。
+     * 合并时逐片重算比对（`finishDownload`），内容对不上就拒绝保存损坏文件。
+     * 只活在内存里、随任务结束清理；断点续传前缀由 [newPartDigest] 预先喂好，不额外读整片。
+     */
+    private val taskPartDigests = ConcurrentHashMap<Long, ConcurrentHashMap<String, String>>()
+
+    /**
+     * 为某个分片准备分片级校验摘要：先把**断点续传已有的前缀**喂进去，之后由
+     * [ChunkDownloader.downloadChunk] 在写入时增量更新（全程只多读一次前缀，不额外读整个分片）。
+     * ★ 前缀读取失败时返回 null（这一片放弃校验）：校验只做"额外保险"，绝不能把正常下载弄挂。
+     */
+    private fun newPartDigest(partFile: File): MessageDigest? = runCatching {
+        val md = MessageDigest.getInstance("SHA-256")
+        if (partFile.length() > 0) {
+            FileInputStream(partFile).use { fis ->
+                val buf = ByteArray(64 * 1024)
+                while (true) {
+                    val r = fis.read(buf)
+                    if (r <= 0) break
+                    md.update(buf, 0, r)
+                }
+            }
+        }
+        md
+    }.onFailure {
+        Log.w(TAG, "分片摘要前缀读取失败（该片跳过校验）：${partFile.name} ${it.message}")
+    }.getOrNull()
+
+    /** 下载调试：某任务当前每个在飞分片（= 每个线程正在干什么）；无在飞分片时返回空表 */
+    fun chunkDebugSnapshot(taskId: Long): List<ChunkDebug> {
+        val map = activeChunkMaps[taskId] ?: return emptyList()
+        return map.map { (key, d) ->
+            ChunkDebug(
+                key = key,
+                start = d.start,
+                size = d.size,
+                worker = d.worker,
+                received = d.bytes.get(),
+                bps = d.lastBps,
+                elapsedMs = d.elapsedMs,
+                preemptCount = d.preemptCount,
+                preempting = d.preempt.get()
+            )
+        }.sortedBy { it.start }
+    }
+
+    /** 下载调试：手动把某一路标记为「慢连接、换连接续传」（调试页的「强制重连」） */
+    fun forcePreemptChunk(taskId: Long, key: String): Boolean {
+        val d = activeChunkMaps[taskId]?.get(key) ?: return false
+        DownloadDebugLog.record(taskId, "手动抢占", "调试页强制重连 key=$key")
+        d.preempt.set(true)
+        return true
+    }
+
+    /** 下载调试：全局资源快照（在飞配额占用 / 活跃任务数 / 堆内存 / 分片 IO 线程池） */
+    fun resourceDebugSnapshot(): DownloadResourceDebug {
+        val rt = Runtime.getRuntime()
+        val pool = chunkIoExecutor
+        return DownloadResourceDebug(
+            inflightCap = MAX_INFLIGHT_CHUNKS,
+            inflightUsed = MAX_INFLIGHT_CHUNKS - inflightLimiter.availablePermits,
+            activeTasks = activeJobs.size,
+            heapUsed = rt.totalMemory() - rt.freeMemory(),
+            heapMax = rt.maxMemory(),
+            poolSize = pool.poolSize,
+            poolActive = pool.activeCount,
+            poolQueue = pool.queue.size
+        )
+    }
 
     /** 实时下载统计（速度/剩余时间/线程数） */
     private val _stats = MutableStateFlow<Map<Long, DownloadStats>>(emptyMap())
@@ -412,6 +562,19 @@ class DownloadManager(
         lastModified: String = "",
         /** 镜像主 URL 不可达时的回退直连（默认空=不回退）；仅 GitHub 等镜像下载传入 */
         fallbackUrl: String = "",
+        /**
+         * 单文件多源分片（实验性 C2）的备选源（同一文件其他账号的直链 + 各自请求头）。
+         * 空 = 单源，行为与未开启该功能时完全一致；只对内置分片下载器生效，Gopeed 引擎任务忽略它。
+         */
+        altSources: List<DownloadSource> = emptyList(),
+        /**
+         * 需要合轨的**音轨直链**（哔哩哔哩 DASH 高清：音视频分离成两路）。
+         * 非空 = 先下视频轨（[url]）与音轨（本字段）再用 mp4parser 合轨成一个 mp4；
+         * 空 = 普通单文件下载。带合轨的任务**强制走内置下载器**（Gopeed 引擎没有合轨能力）。
+         */
+        mergeAudioUrl: String = "",
+        /** 音轨的请求头（与 [headers] 一样加密落库；各平台校验 Referer/Cookie） */
+        mergeAudioHeaders: Map<String, String> = emptyMap(),
         /** 下载成功完成后的清理回调（如删除网盘临时转存文件）；失败/取消不触发。
          * 注意：必须是最后一个参数（调用点有大量尾随 lambda 用法，放它之后会编译失败）。 */
         onComplete: suspend () -> Unit = {}
@@ -434,6 +597,9 @@ class DownloadManager(
             dao.insert(
                 DownloadTaskEntity(
                     url = url, fileName = safeName, requestHeadersJson = encodeHeaders(headers),
+                    altSourcesJson = encodeAltSources(altSources),
+                    mergeAudioUrl = mergeAudioUrl,
+                    mergeAudioHeadersJson = if (mergeAudioUrl.isNotBlank()) encodeHeaders(mergeAudioHeaders) else "",
                     platform = taskPlatform, sourceFileId = sourceFileId, sourceType = sourceType,
                     sourceContext = sourceContext, urlExpiresAt = urlExpiresAt,
                     etag = etag, lastModified = lastModified
@@ -450,19 +616,30 @@ class DownloadManager(
             DiagnosticLog.OPERATION, "download_enqueue",
             "id=$id platform=$taskPlatform size=$size name=$safeName"
         )
+        DownloadDebugLog.record(
+            id, "入队",
+            "平台=${taskPlatform.ifBlank { "-" }} 文件名=$safeName " +
+                "大小=${if (size > 0) size else "未知"} 直链=${LogRedactor.url(url)}"
+        )
         // 保存请求头（Cookie/UA），暂停后恢复仍需携带
         if (headers.isNotEmpty()) taskHeaders[id] = headers
+        // 备选源（多源分片）同样留在内存里，恢复/续传时不必回查数据库
+        if (altSources.isNotEmpty()) taskAltSources[id] = altSources
         if (size > 0) taskSizes[id] = size
         if (fallbackUrl.isNotBlank()) taskFallbackUrls[id] = fallbackUrl
+        if (mergeAudioUrl.isNotBlank()) taskMergeAudioHeaders[id] = mergeAudioHeaders
         taskCallbacks[id] = onComplete
         // 磁力但引擎不可用：立刻落一条**带原因的失败任务**并结束。若照常走内置下载器，
         // 它会把 magnet: 当普通 URL 发 HTTP 请求，最后抛一个和「该去导入内核」毫无关系的协议错误。
         val blocked = magnetBlockReason(isMagnet)
         if (blocked != null) {
             Log.w(TAG, "磁力任务被拦下：id=$id 原因=$blocked")
+            DownloadDebugLog.record(id, "拦截失败", blocked)
             taskCallbacks.remove(id)
             // 不会有下载协程来消费这几份内存数据了，直接清掉
             taskHeaders.remove(id)
+            taskAltSources.remove(id)
+            taskMergeAudioHeaders.remove(id)
             taskSizes.remove(id)
             taskFallbackUrls.remove(id)
             dao.updateStatus(id, DownloadTaskEntity.STATUS_FAILED)
@@ -472,7 +649,7 @@ class DownloadManager(
             )
             return id
         }
-        if (shouldUseEngine(taskPlatform)) {
+        if (shouldUseEngine(taskPlatform, needMerge = mergeAudioUrl.isNotBlank())) {
             // 任务登记、下载页展示、完成清理回调都与内置下载器完全一致，只有「执行」交给 Gopeed 引擎
             launchEngineTask(id) { startViaEngine(id, url, safeName, headers, taskPlatform) }
         } else {
@@ -499,9 +676,13 @@ class DownloadManager(
         onComplete = onComplete
     )
 
-    /** 是否把任务交给 Gopeed 引擎：设置里选了引擎 + 引擎已导入；GitHub 走镜像回退（引擎不支持），始终用内置下载器 */
-    private fun shouldUseEngine(platform: String): Boolean =
-        platform != DownloadPlatform.GITHUB &&
+    /**
+     * 是否把任务交给 Gopeed 引擎：设置里选了引擎 + 引擎已导入；GitHub 走镜像回退（引擎不支持），
+     * **DASH 合轨任务**（引擎没有合轨能力）也始终用内置下载器。
+     */
+    private fun shouldUseEngine(platform: String, needMerge: Boolean = false): Boolean =
+        !needMerge &&
+            platform != DownloadPlatform.GITHUB &&
             settings.downloadEngine == SettingsRepository.ENGINE_GOPEED &&
             GopeedEngine.isInstalled(context)
 
@@ -542,14 +723,31 @@ class DownloadManager(
                 if (GopeedEngine.state.value != GopeedEngine.State.RUNNING) {
                     GopeedEngine.start(context, dir)
                 }
+                // ★ 目录结构必须拆成「saveDir + 纯文件名」两段交给引擎，不能把带斜杠的相对路径
+                //   整串塞进 opts.name：引擎按纯文件名处理时（取 basename / 净化非法字符）斜杠会被吃掉，
+                //   整批文件就平铺到引擎目录根 —— 表现为「整个文件夹下载后只有一个文件进了文件夹，
+                //   其余散落在下载目录」。桌面版一直是这样拆的，Android 这边之前漏了。
+                val safe = DownloadPathPolicy.sanitize(
+                    fileName,
+                    "download_${System.currentTimeMillis()}"
+                )
+                val destDir = if (safe != null && safe.relativeDirectory.isNotBlank()) {
+                    File(dir, safe.relativeDirectory)
+                } else {
+                    dir
+                }
+                // 引擎不会替我们建目录：目录不存在就把任务建在了一个不存在的路径上
+                if (!destDir.exists() && !destDir.mkdirs()) {
+                    throw java.io.IOException("无法创建目录：$destDir")
+                }
                 GopeedEngine.createTask(
                     url = url,
-                    saveDir = dir,
+                    saveDir = destDir,
                     headers = headers,
                     // 磁力（BT）不吃连接数：那是 http 协议的分片并发参数
                     connections = if (platform == DownloadPlatform.MAGNET) 0 else threadProvider(platform),
                     // 磁力在元数据到手前没有名字：交给引擎自己命名（种子名稍后写回本地记录）
-                    name = if (platform == DownloadPlatform.MAGNET) "" else fileName,
+                    name = if (platform == DownloadPlatform.MAGNET) "" else (safe?.fileName ?: fileName),
                     labels = mapOf("yunxTaskId" to id.toString())
                 ).also { createdEngineId = it }
             }
@@ -560,6 +758,7 @@ class DownloadManager(
             throw e
         } catch (e: Throwable) {
             Log.e(TAG, "引擎建任务失败：id=$id ${e.message}", e)
+            DownloadDebugLog.record(id, "失败", "引擎建任务失败：${e.message ?: e.javaClass.simpleName}")
             dao.updateStatus(id, DownloadTaskEntity.STATUS_FAILED)
             dao.updateError(id, DownloadFailurePolicy.userMessage(e))
             sharedSlots.release(id)
@@ -567,6 +766,7 @@ class DownloadManager(
             return
         }
         Log.d(TAG, "引擎任务已创建：yunxId=$id engineId=$engineTaskId")
+        DownloadDebugLog.record(id, "引擎任务创建", "engineId=$engineTaskId 平台=$platform 连接数=${threadProvider(platform)}")
         DiagnosticLog.log(
             DiagnosticLog.DOWNLOAD, "engine_task_created", taskId = id, status = "downloading",
             summary = "engineId=$engineTaskId platform=$platform name=$fileName"
@@ -689,6 +889,7 @@ class DownloadManager(
     /** 引擎任务完成：状态/保存路径/平均速度落库 + 触发清理回调（语义与内置下载器的完成路径一致） */
     private suspend fun completeEngineTask(task: DownloadTaskEntity, size: Long) {
         val dir = GopeedEngine.resolveDownloadDir(context)
+        DownloadDebugLog.record(task.id, "完成", "引擎任务完成 大小=$size 目录=$dir")
         // 磁力（BT）任务的真实名字/落盘结构只有引擎解析完元数据才知道：
         // 引擎侧 TorrentDirMaker 用 opts.path、FilePathMaker 返回「种子名/子路径」⇒ 多文件种子落成
         // <下载目录>/<种子名>/...，单文件种子落成 <下载目录>/<种子名>。本地记录里的 fileName 是元数据
@@ -698,7 +899,20 @@ class DownloadManager(
             .onFailure { Log.w(TAG, "读取引擎任务详情失败，用本地文件名兜底：id=${task.id} ${it.message}") }
             .getOrNull()
         val realName = detail?.name?.takeIf { it.isNotBlank() } ?: task.fileName
-        val output = File(dir, realName)
+        val isMagnetTask = task.platform == DownloadPlatform.MAGNET
+        // ★ 非磁力任务的实际落盘位置 = 引擎目录 + 相对子目录 + 文件名（子目录是作为 saveDir 下发的，
+        //   见 startViaEngine）。只用「引擎目录 + 引擎报的名字」拼会丢掉子目录 ⇒ 记录指向一个
+        //   不存在的文件，之后「打开 / 删除本地文件」都会找错地方。磁力例外：落盘结构由种子决定。
+        val output = if (isMagnetTask) {
+            File(dir, realName)
+        } else {
+            val safe = DownloadPathPolicy.sanitize(task.fileName, "download_${task.id}")
+            if (safe != null) {
+                File(File(dir, safe.relativeDirectory), safe.fileName)
+            } else {
+                File(dir, realName)
+            }
+        }
         val savedPath = output.absolutePath
         val outputError = GopeedEngine.completedOutputError(output, size, detail?.folder ?: output.isDirectory)
         if (outputError != null) {
@@ -728,8 +942,9 @@ class DownloadManager(
             size = size,
             summary = "path=$savedPath 文件数=${detail?.fileCount ?: -1} 目录=${detail?.folder ?: false}"
         )
-        if (realName != task.fileName) {
-            // 磁力：把界面上占位的显示名换成真正的种子名（失败只记日志，不影响已完成状态）
+        if (isMagnetTask && realName != task.fileName) {
+            // 磁力：把界面上占位的显示名换成真正的种子名（失败只记日志，不影响已完成状态）。
+            // ★ 非磁力不要回写：task.fileName 里带着相对目录，用引擎报的纯文件名覆盖会把目录丢掉。
             runCatching { dao.updateFileName(task.id, realName) }
                 .onFailure { Log.w(TAG, "回写种子名失败：id=${task.id} ${it.message}") }
         }
@@ -747,6 +962,8 @@ class DownloadManager(
     private fun releaseEngineTaskMemory(id: Long) {
         sharedSlots.release(id)
         taskHeaders.remove(id)
+        taskAltSources.remove(id)
+        taskMergeAudioHeaders.remove(id)
         taskSizes.remove(id)
         taskFallbackUrls.remove(id)
     }
@@ -828,7 +1045,15 @@ class DownloadManager(
             sourceContext = task.sourceContext,
             urlExpiresAt = task.urlExpiresAt,
             etag = task.etag,
-            lastModified = task.lastModified
+            lastModified = task.lastModified,
+            // 多源分片与 DASH 合轨也要跟着复用：只传主直链会让「重新下载」退化成单源 / 丢音轨
+            altSources = taskAltSources[id] ?: loadPersistedAltSources(id),
+            mergeAudioUrl = task.mergeAudioUrl,
+            mergeAudioHeaders = if (task.mergeAudioUrl.isNotBlank()) {
+                taskMergeAudioHeaders[id] ?: loadPersistedMergeAudioHeaders(id)
+            } else {
+                emptyMap()
+            }
         )
         return true
     }
@@ -855,6 +1080,7 @@ class DownloadManager(
         // 恢复时未传 headers：沿用入队时保存的（Cookie/UA 对直链下载是必需的）
         val effectiveHeaders = headers.ifEmpty { taskHeaders[id] ?: emptyMap() }
         Log.d(TAG, "start: id=$id headers=${effectiveHeaders.keys}")
+        DownloadDebugLog.record(id, "开始/恢复", "请求头=${effectiveHeaders.keys.joinToString(",").ifBlank { "-" }}")
         synchronized(jobsLock) {
             // 原子注册：检查 + 占位 + launch + complete 在同一锁内完成，
             // pause/remove 要么拿到已注册的 job，要么拿不到（视为未运行）
@@ -896,6 +1122,7 @@ class DownloadManager(
                     if (isTaskActive()) {
                         val reason = e.message ?: e.javaClass.simpleName
                         Log.e(TAG, "task $id failed: $reason", e)
+                        DownloadDebugLog.record(id, "失败", reason)
                         dao.updateStatus(id, DownloadTaskEntity.STATUS_FAILED)
                         dao.updateError(id, DownloadFailurePolicy.userMessage(e))
                         // 终态通知：失败同样先出流体云胶囊，随后转为可划掉的普通通知
@@ -910,6 +1137,9 @@ class DownloadManager(
                     // 任务结束（成功/失败/暂停/删除）：无任务时停止前台服务
                     sharedSlots.release(id)
                     onTaskFinished()
+                    // 任务协程已结束，在飞表不会再更新：撤掉下载调试的登记（否则会留下一个空表占位）
+                    activeChunkMaps.remove(id)
+                    taskPartDigests.remove(id)
                     // 只移除自己注册的 deferred：
                     // 若暂停后立即恢复（新 job 已注册到同一 id），不能误删新任务的注册，
                     // 否则新任务将无法再被暂停/删除（后台继续下载）
@@ -968,6 +1198,7 @@ class DownloadManager(
     fun pause(id: Long) {
         Log.d(TAG, "pause: id=$id")
         DiagnosticLog.event(DiagnosticLog.OPERATION, "download_pause", "id=$id")
+        DownloadDebugLog.record(id, "暂停", "用户暂停，分片文件保留")
         engineLaunchJobs.remove(id)?.cancel()
         // 引擎任务：额外通知引擎暂停；本地状态与清理继续走下面的原逻辑（引擎任务没有分片文件，两步互不干扰）
         taskEngineIds[id]?.let { engineId ->
@@ -1005,6 +1236,7 @@ class DownloadManager(
      */
     fun remove(id: Long, deleteLocal: Boolean = false) {
         Log.d(TAG, "remove: id=$id deleteLocal=$deleteLocal")
+        DownloadDebugLog.record(id, "删除", "deleteLocal=$deleteLocal")
         engineLaunchJobs.remove(id)?.cancel()
         // 引擎任务：额外通知引擎删除；本地清理（DB 记录 + 已下载文件）继续走下面的原逻辑
         taskEngineIds[id]?.let { engineId ->
@@ -1029,6 +1261,8 @@ class DownloadManager(
         downloader.cancelCalls(id)
         _stats.update { it - id }
         taskHeaders.remove(id)
+        taskAltSources.remove(id)
+        taskMergeAudioHeaders.remove(id)
         taskFallbackUrls.remove(id)
         // 删除任务同样触发清理回调（如删除网盘临时转存文件）：
         // 用户放弃下载时云盘里已转存的临时文件也应一并清理
@@ -1080,6 +1314,56 @@ class DownloadManager(
         return credentialCipher.encrypt(json, "download.requestHeaders")
     }
 
+    /**
+     * 备选源（实验性 C2）落库：数组 JSON 整体按 `download.altSources` 加密 ——
+     * 里面是各账号的直链与 Cookie，敏感级别与请求头一致，必须加密。
+     * 空列表存空串，与「从未开启该功能」完全同形。
+     */
+    private fun encodeAltSources(sources: List<DownloadSource>): String {
+        if (sources.isEmpty()) return ""
+        val array = JSONArray()
+        sources.forEach { source ->
+            array.put(
+                JSONObject().apply {
+                    put("url", source.url)
+                    put(
+                        "headers",
+                        JSONObject().apply { source.headers.forEach { (name, value) -> put(name, value) } }
+                    )
+                }
+            )
+        }
+        return credentialCipher.encrypt(array.toString(), "download.altSources")
+    }
+
+    /**
+     * 取回备选源。解析失败（密文损坏 / 换了密钥）时按**单源**处理而不是清任务：
+     * 多源只是提速手段，丢了它照样能把文件下完，没必要因此让用户丢进度。
+     */
+    private suspend fun loadPersistedAltSources(id: Long): List<DownloadSource> {
+        val stored = dao.get(id)?.altSourcesJson.orEmpty()
+        if (stored.isBlank()) return emptyList()
+        return runCatching {
+            val text = credentialCipher.decrypt(stored, "download.altSources")
+            val array = JSONArray(text)
+            buildList {
+                for (i in 0 until array.length()) {
+                    val obj = array.getJSONObject(i)
+                    val url = obj.optString("url")
+                    if (url.isBlank()) continue
+                    val headersJson = obj.optJSONObject("headers")
+                    val headers = buildMap {
+                        headersJson?.keys()?.forEach { name -> put(name, headersJson.getString(name)) }
+                    }
+                    add(DownloadSource(url, headers))
+                }
+            }
+        }.getOrElse {
+            Log.w(TAG, "loadPersistedAltSources: id=$id 解析失败，本次按单源下载")
+            emptyList()
+        }
+    }
+
     private suspend fun loadPersistedHeaders(id: Long): Map<String, String> {
         val stored = dao.get(id)?.requestHeadersJson.orEmpty()
         if (stored.isBlank()) return emptyMap()
@@ -1094,12 +1378,14 @@ class DownloadManager(
                 }
             }
         }.getOrElse { error ->
-            if (!com.yunx.app.data.security.CredentialStore.isKeyLost(error)) {
-                // A locked or temporarily unavailable Keystore must not erase resumable headers.
-                throw error
+            // ★ 解不开就**不要**把存的那份请求头覆盖成空表：那等于把「恢复下载」要用的 Cookie
+            //   直接丢掉，又是一次「一次抖动 = 不可逆丢数据」。
+            Log.w(TAG, "loadPersistedHeaders: id=$id 请求头解密失败，保留原值：${error.message}")
+            if (com.yunx.app.data.security.CredentialStore.isKeyLost(error)) {
+                // 密钥确实没了：标记一次，让设置页提示用户重新登录（库里的密文保持原样，不覆盖）
+                com.yunx.app.data.security.CredentialStore.markKeyLost()
             }
-            com.yunx.app.data.security.CredentialStore.markKeyLost()
-            dao.updateRequestHeaders(id, "{}")
+            // A locked or temporarily unavailable Keystore must not erase resumable headers.
             throw error
         }
     }
@@ -1274,6 +1560,7 @@ class DownloadManager(
                         currentHeaders = loadPersistedHeaders(id)
                         attempts = 0
                         Log.d(TAG, "runTaskWithRetry: id=$id 已刷新临时直链，保留分片继续下载")
+                        DownloadDebugLog.record(id, "刷新直链", "HTTP $expiredStatus 判定过期，已重新取链并保留分片")
                         continue
                     }
                     if (DownloadFailurePolicy.isNetworkFailure(e) && !isNetworkAvailable()) {
@@ -1289,6 +1576,7 @@ class DownloadManager(
                             DiagnosticLog.DOWNLOAD, "task_retry",
                             "task=$id | attempt=$attempts/$maxRetries | err=${e.message}"
                         )
+                        DownloadDebugLog.record(id, "重试", "第 $attempts/$maxRetries 次：${e.message}")
                         // 逐次递增延迟，避免失败风暴
                         delay(1200L * attempts)
                     } else {
@@ -1355,6 +1643,17 @@ class DownloadManager(
         updatePhase(id, "下载中")
         taskStartTimes[id] = System.currentTimeMillis()
         Log.d(TAG, "runTask: id=$id fileName=${task.fileName}")
+        // 下载调试：记下开始时的网络/电源环境（网络类型、信号、省电模式），后面靠看门狗检测「是否切换网络」
+        if (DownloadDebugLog.isEnabled()) {
+            DownloadDebugLog.record(id, "网络环境", DownloadDebugLog.environmentSnapshot(context))
+        }
+
+        // DASH 分轨合轨（哔哩哔哩高清）：视频轨 + 音轨各自下载 → mp4parser 合轨，不走 Range 分片
+        if (task.mergeAudioUrl.isNotBlank()) {
+            Log.d(TAG, "runTask: id=$id DASH 分轨合轨 音轨=${LogRedactor.url(task.mergeAudioUrl)}")
+            dashMergeDownload(id, task, headers)
+            return
+        }
 
         // HLS（m3u8 转码流，如 UC play）：不走 Range 分片，直接拉分片合并
         if (task.url.contains(".m3u8", true) || task.url.contains(".m3u", true)) {
@@ -1380,11 +1679,13 @@ class DownloadManager(
         if (total == null) {
             // 服务器不返回文件大小（Range/Content-Length 均缺失）：降级为流式下载（开放区间 Range）
             Log.w(TAG, "runTask: id=$id 无法获取总大小，降级流式下载 origin=${LogRedactor.url(task.url)}")
+            DownloadDebugLog.record(id, "降级流式下载", "服务器未返回大小（Content-Length/Range 均缺失）")
             DiagnosticLog.warn(DiagnosticLog.DOWNLOAD, "task_stream_fallback", "task=$id | 服务器没给大小，降级流式下载")
             streamDownload(id, task, headers)
             return
         }
         Log.d(TAG, "getTotalSize: id=$id total=$total origin=${LogRedactor.url(task.url)}")
+        DownloadDebugLog.record(id, "探测大小", "total=$total 已有进度=${task.downloadedSize}")
         ensureTempSpace(total, task.downloadedSize)
         DiagnosticLog.log(
             DiagnosticLog.DOWNLOAD, "task_size_probed", taskId = id, status = "downloading", size = total,
@@ -1396,12 +1697,17 @@ class DownloadManager(
 
         val threadCount = threadProvider(task.platform).coerceAtLeast(1)
         val chunkDir = chunkDirOf(id).apply { mkdirs() }
+        // 分片级校验：本次运行内记录每个分片下载时算出的摘要，合并时逐片重算比对（下面清空旧分片时会一并作废）
+        val partDigests = ConcurrentHashMap<String, String>()
+        taskPartDigests[id] = partDigests
         val planFile = File(chunkDir, "plan.txt")
         val savedPlan = if (planFile.exists()) TransferPlan.parse(planFile.readText(), total) else null
         if (planFile.exists() && savedPlan == null) {
             Log.w(TAG, "runTask: id=$id 旧计划无效或文件大小变化，清空不可信分片")
+            DownloadDebugLog.record(id, "断点失效", "旧分片计划无效或文件大小变化，清空旧分片重下")
             check(chunkDir.deleteRecursively()) { "无法清理旧下载分片" }
             check(chunkDir.mkdirs()) { "无法创建下载缓存" }
+            partDigests.clear()   // 旧分片已删，摘要一并作废
         }
         // Reuse valid legacy geometry even when the user changes connection count.
         val plan = savedPlan ?: chunkCountFor(total, threadCount).let {
@@ -1442,9 +1748,31 @@ class DownloadManager(
         _stats.update { it + (id to DownloadStats(chunkCount = connections.limit, phase = "下载中")) }
         DiagnosticLog.log(DiagnosticLog.DOWNLOAD, "chunk_plan", taskId = id, size = total,
             summary = "持久分片=${plan.chunks} 并发上限=$maximum 起始并发=${connections.limit} 已有=${downloaded.get()}")
+        // ---------- 单文件多源分片（实验性 C2）----------
+        // 同一个文件的多条直链分属不同账号，分片按序号轮流交给不同源（每条直链带着它自己账号的请求头）。
+        // ★ 分片规划一个字节都不动（plan.txt 不变）⇒ 与单源共用同一套断点续传：
+        //   开关该功能只影响「哪条直链下哪一片」，分片区间与文件名不变，已有断点不会失效。
+        // 未开启 / 平台不支持 / 只有一个账号时 sources 只有主源一项，行为与开启前完全一致。
+        val altSources = taskAltSources[id] ?: loadPersistedAltSources(id).also {
+            if (it.isNotEmpty()) taskAltSources[id] = it
+        }
+        val sources = buildList {
+            add(DownloadSource(task.url, requestHeaders))
+            altSources.forEach { source -> if (source.url.isNotBlank()) add(source) }
+        }
+        /** 某个字节偏移所在分片用哪个源：offset / chunkSize 就是分片序号，按序号轮转 */
+        fun sourceOf(offset: Long): DownloadSource =
+            if (sources.size == 1) sources[0] else sources[((offset / chunkSize) % sources.size).toInt()]
+        if (sources.size > 1) {
+            DownloadDebugLog.record(id, "多源分片", "源数=${sources.size}（含主源）分片按序号轮流使用")
+        }
+
         val nextIdx = AtomicInteger(0)
         val failed = ConcurrentHashMap<Long, TransferPart>()
+        // 在飞分片表（key = m<片号> / seg@<起点>）：仅供看门狗算瞬时速度与抢占判定
         val inflightChunks = ConcurrentHashMap<String, InflightChunk>()
+        // 登记给「下载调试」按需读取（start 的 finally 里移除）；不在下载热路径上做任何额外工作
+        activeChunkMaps[id] = inflightChunks
         val lastPersistAt = AtomicLong(0)
         val speedRecorder = SpeedRecorder()
         val currentSpeed = AtomicLong(0)
@@ -1452,15 +1780,26 @@ class DownloadManager(
         val rangeIgnored = AtomicBoolean(false)
         val confirmedNoRange = AtomicBoolean(false)
 
-        suspend fun transfer(part: TransferPart): ChunkResult = connections.withPermit {
+        suspend fun transfer(part: TransferPart, worker: Int): ChunkResult = connections.withPermit {
             inflightLimiter.withPermit {
-                val key = "seg@${part.start}"
-                val diag = InflightChunk(part.start, part.size).also { it.bytes.set(part.file.length()); it.lastBytes = it.bytes.get() }
+                // 在飞分片 key：主池 part_3 → m3；弹性区/修复区间 → seg@<起点>
+                val key = if (part.file.name.startsWith("part_")) {
+                    "m" + part.file.name.removePrefix("part_")
+                } else {
+                    "seg@${part.start}"
+                }
+                val diag = InflightChunk(part.start, part.size, worker)
+                    .also { it.bytes.set(part.file.length()); it.lastBytes = it.bytes.get() }
                 inflightChunks[key] = diag
+                // 多源分片：这一片交给哪个账号的直链（单源时恒为主源）
+                val src = sourceOf(part.start)
+                // 分片级校验：本片（含续传前缀）的摘要，写完即登记，合并时逐片比对
+                val digest = newPartDigest(part.file)
                 try {
-                    downloader.downloadChunk(id, task.url, part.start, part.end, part.file, requestHeaders,
+                    val result = downloader.downloadChunk(id, src.url, part.start, part.end, part.file, src.headers,
                         preempt = diag.preempt, expectedTotal = total, expectedEtag = expectedEtag,
-                        onCongestion = { wait -> connections.congested(wait) }) { bytes ->
+                        onCongestion = { wait -> connections.congested(wait) },
+                        contentDigest = digest) { bytes ->
                         speedLimiter.awaitAllow(bytes)
                         diag.bytes.addAndGet(bytes)
                         newBytes.addAndGet(bytes)
@@ -1473,11 +1812,24 @@ class DownloadManager(
                         }
                         notifyProgress(id, task.fileName, new, total)
                         persistProgressIfDue(id, new, total, false, lastPersistAt)
-                    }.also {
-                        if (downloader.hasSourceExpiryFailure(id)) {
-                            throw java.io.IOException("临时下载链接失效，准备刷新")
-                        }
                     }
+                    if (downloader.hasSourceExpiryFailure(id)) {
+                        throw java.io.IOException("临时下载链接失效，准备刷新")
+                    }
+                    // 只在成功时登记摘要：失败/忽略 Range 的片会在后续修复重试里重新算
+                    if (result == ChunkResult.OK && digest != null) {
+                        partDigests[part.file.name] = digest.digest().toHexDigest()
+                    }
+                    // 抢占后的结果：这条分片换过连接，最终是续传成功还是仍失败（含换连接后跑出的成绩）
+                    if (diag.preemptCount > 0) {
+                        DownloadDebugLog.record(
+                            id, "抢占结果",
+                            "分片=$key worker#$worker 结果=${result.name} " +
+                                "已收=${diagSize(diag.bytes.get())}/${diagSize(diag.size)} " +
+                                "用时=${diag.elapsedMs / 1000}s 共抢占${diag.preemptCount}次"
+                        )
+                    }
+                    result
                 } finally { inflightChunks.remove(key) }
             }
         }
@@ -1485,6 +1837,7 @@ class DownloadManager(
         coroutineScope {
             // A single watchdog covers primary downloads AND repair passes; cancellation is immediate on exit.
             var sampledBytes = 0L
+            var lastNetSig = DownloadDebugLog.networkSignature(context)
             val watchdog = launch(Dispatchers.IO) {
                 while (isActive) {
                     delay(PREEMPT_TICK_MS)
@@ -1496,6 +1849,14 @@ class DownloadManager(
                     connections.sample(windowSpeed, nextIdx.get() < mainParts.size || tail.hasPending(),
                         (runtime.totalMemory() - runtime.freeMemory()) > runtime.maxMemory() * 3 / 4)
                     preemptSlowChunks(id, inflightChunks)
+                    // 下载调试：网络特征串变化 = 换了网络（切 Wi-Fi/蜂窝、掉线重连、开关飞行模式），附完整环境
+                    if (DownloadDebugLog.isEnabled()) {
+                        val sig = DownloadDebugLog.networkSignature(context)
+                        if (sig != lastNetSig) {
+                            lastNetSig = sig
+                            DownloadDebugLog.record(id, "网络变化", DownloadDebugLog.environmentSnapshot(context))
+                        }
+                    }
                 }
             }
             try {
@@ -1508,7 +1869,7 @@ class DownloadManager(
                             val part = if (idx < mainParts.size) mainParts[idx]
                                 else tail.take(connections.blockBytes(currentSpeed.get())) ?: break
                             if (part.file.length() == part.size) continue
-                            val result = transfer(part)
+                            val result = transfer(part, worker)
                             if (result != ChunkResult.OK) failed[part.start] = part
                             if (result == ChunkResult.RANGE_IGNORED) {
                                 // Stop allocating NEW work. Drain active connections, then verify serially.
@@ -1524,8 +1885,8 @@ class DownloadManager(
                     delay(1000)
                     val probe = failed.values.sortedBy { it.start }.firstOrNull()
                     if (probe != null) {
-                        var result = transfer(probe)
-                        if (result == ChunkResult.RANGE_IGNORED) { delay(1000); result = transfer(probe) }
+                        var result = transfer(probe, 0)
+                        if (result == ChunkResult.RANGE_IGNORED) { delay(1000); result = transfer(probe, 0) }
                         if (result == ChunkResult.RANGE_IGNORED) confirmedNoRange.set(true)
                         else if (result == ChunkResult.OK) failed.remove(probe.start)
                     }
@@ -1540,11 +1901,11 @@ class DownloadManager(
                     val pending = failed.values.sortedBy { it.start }
                     val repairIndex = AtomicInteger(0)
                     val repaired = ConcurrentHashMap<Long, Boolean>()
-                    List(minOf(maximum, pending.size)) {
+                    List(minOf(maximum, pending.size)) { worker ->
                         async(chunkIoDispatcher) {
                             while (true) {
                                 val part = pending.getOrNull(repairIndex.getAndIncrement()) ?: break
-                                repaired[part.start] = transfer(part) == ChunkResult.OK
+                                repaired[part.start] = transfer(part, worker) == ChunkResult.OK
                             }
                         }
                     }.awaitAll()
@@ -1697,6 +2058,112 @@ class DownloadManager(
     }
 
     /**
+     * DASH 分轨合轨下载（哔哩哔哩高清）：视频轨 + 音轨各自下载 → mp4parser 合轨 → 保存 → 完成回调。
+     *
+     * ★ 为什么不用分片下载：合轨要求两轨都是完整文件，分片只会再叠一层临时文件、放大峰值占用与
+     *   失败面；这两条轨道通常几十 MB，单连接流式下载足够。
+     * ★ 全程只在 cache 下的临时目录里操作，**合轨成功且保存成功后**才清理；任何一步失败都抛错，
+     *   由上层落成「带原因的失败任务」，绝不把半个文件当成品留在下载目录。
+     */
+    private suspend fun dashMergeDownload(id: Long, task: DownloadTaskEntity, headers: Map<String, String>) {
+        if (!isTaskActive()) return
+        _stats.update { it + (id to DownloadStats(0L, -1L, 1)) }
+        val workDir = File(context.cacheDir, "dash_$id")
+        workDir.deleteRecursively()
+        if (!workDir.mkdirs()) throw IllegalStateException("无法创建合轨临时目录")
+        val videoFile = File(workDir, "video.m4s")
+        val audioFile = File(workDir, "audio.m4s")
+        val mergedFile = File(workDir, "merged.mp4")
+        val progress = AtomicLong(0L)
+        val lastAt = AtomicLong(0L)
+        try {
+            // 重启恢复时内存里没有音轨头，回查数据库（与主请求头同样的加密存储）
+            val audioHeaders = taskMergeAudioHeaders[id] ?: loadPersistedMergeAudioHeaders(id)
+            streamUrlToFile(task.url, headers, videoFile, id, task.fileName, progress, lastAt)
+            streamUrlToFile(task.mergeAudioUrl, audioHeaders, audioFile, id, task.fileName, progress, lastAt)
+            if (!DashMuxer.mux(videoFile, audioFile, mergedFile)) {
+                throw IllegalStateException("分轨合轨失败（音视频轨道不配套或文件不完整），可改用未登录的单文件低清")
+            }
+            // Android 9- 保存前检查存储权限（动态申请，授权后继续；无权限则报错提示）
+            if (!storagePermissionProvider()) {
+                throw IllegalStateException("未授予存储权限，无法保存到下载目录")
+            }
+            val savedPath = withContext(Dispatchers.IO) {
+                DownloadSaver.save(context, task.fileName, mergedFile, saveDirProvider())
+            } ?: throw IllegalStateException("保存到下载目录失败")
+            val total = mergedFile.length()
+            completeWithAvg(id, savedPath, total)
+            Log.d(TAG, "dashMergeDownload: id=$id 合轨完成 savedPath=$savedPath size=$total")
+            DownloadService.notifyResult(
+                context, id, task.fileName, success = true, promote = showSpeedProvider()
+            )
+            taskCallbacks.remove(id)?.let { cb -> runCatching { cb() } }
+            _stats.update { it - id }
+        } finally {
+            // 成功、失败、取消一律清临时文件：几份完整轨道占的空间很可观
+            workDir.deleteRecursively()
+        }
+    }
+
+    /**
+     * 把整段响应流式写入文件，并按写入量上报进度（合轨的两条轨道各调一次）。
+     *
+     * 任务被取消/暂停时直接抛 [CancellationException] 结束下载（临时目录由调用方 finally 清理）。
+     */
+    private suspend fun streamUrlToFile(
+        url: String,
+        headers: Map<String, String>,
+        target: File,
+        id: Long,
+        fileName: String,
+        progress: AtomicLong,
+        lastAt: AtomicLong
+    ) = withContext(Dispatchers.IO) {
+        val headerBuilder = Headers.Builder()
+        headers.forEach { (name, value) -> if (value.isNotBlank()) headerBuilder.add(name, value) }
+        val request = Request.Builder().url(url).headers(headerBuilder.build()).build()
+        HttpClients.downloadClient().newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                throw IllegalStateException("分轨下载失败：HTTP ${response.code}（${LogRedactor.url(url)}）")
+            }
+            val body = response.body ?: throw IllegalStateException("分轨响应为空")
+            body.byteStream().use { input ->
+                target.outputStream().use { out ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        if (!isTaskActive()) throw CancellationException("任务已取消")
+                        val read = input.read(buffer)
+                        if (read <= 0) break
+                        speedLimiter.awaitAllow(read.toLong())
+                        out.write(buffer, 0, read)
+                        val total = progress.addAndGet(read.toLong())
+                        persistProgressIfDue(id, total, 0, force = false, lastAt = lastAt)
+                        notifyProgress(id, fileName, total, 0)
+                    }
+                }
+            }
+        }
+    }
+
+    /** 从库里读回合轨任务的音轨请求头（重启恢复用）；解不开就返回空表并**保留原值** */
+    private suspend fun loadPersistedMergeAudioHeaders(id: Long): Map<String, String> =
+        withContext(Dispatchers.IO) {
+            val stored = dao.get(id)?.mergeAudioHeadersJson.orEmpty()
+            if (stored.isBlank()) return@withContext emptyMap()
+            runCatching {
+                val json = JSONObject(credentialCipher.decrypt(stored, "download.mergeAudioHeaders"))
+                buildMap {
+                    json.keys().asSequence().forEach { key ->
+                        json.optString(key).takeIf { it.isNotBlank() }?.let { put(key, it) }
+                    }
+                }
+            }.getOrElse {
+                Log.w(TAG, "loadPersistedMergeAudioHeaders: id=$id 音轨请求头解密失败，保留原值：${it.message}")
+                emptyMap()
+            }
+        }
+
+    /**
      * 分片流式合并 → **直接写入最终保存位置** → 完成后清空分片目录。
      *
      * ★ 旧实现先合并到私有缓存 `merged_$id` 再复制到公共目录，峰值占用 3 份
@@ -1713,12 +2180,24 @@ class DownloadManager(
         total: Long
     ) {
         if (!isTaskActive()) return
+        // 分片级校验：下载时记录的分片摘要（合并时逐片重算比对；流式/单流/HLS 路径没有记录，跳过校验）
+        val expectedDigests = taskPartDigests[id].orEmpty()
         // 1) 分片完整性
         for (part in chunkFiles) {
             if (!part.exists() || part.length() <= 0) {
                 Log.e(TAG, "finishDownload: id=$id 分片缺失/为空 $part")
                 throw IllegalStateException("分片文件缺失或为空，拒绝合并（防止文件损坏）")
             }
+        }
+        // 下载调试：合并顺序 + 完整性与大小校验（校验口径 = 每片非空 + 每片字节数之和，见下方 written == total）
+        if (DownloadDebugLog.isEnabled()) {
+            val orderText = chunkFiles.take(8).joinToString(",") { "${it.name}=${it.length()}B" } +
+                if (chunkFiles.size > 8) "…共${chunkFiles.size}片" else ""
+            DownloadDebugLog.record(
+                id, "分片校验",
+                "合并=${chunkFiles.size}片 非空=通过 摘要=已记录${expectedDigests.size}片（合并时逐片比对） 顺序=$orderText " +
+                    "字节合计=${chunkFiles.sumOf { it.length() }} 预期=${if (total > 0) total else "未知"}"
+            )
         }
         // 2) Android 9- 保存前检查存储权限（动态申请，授权后继续；无权限则报错提示）
         if (!storagePermissionProvider()) {
@@ -1747,6 +2226,7 @@ class DownloadManager(
                     DiagnosticLog.DOWNLOAD, "merge_progress", taskId = id, status = "merging",
                     size = done, summary = "percent=$percent%"
                 )
+                DownloadDebugLog.record(id, "合并进度", "$percent% 已合并=$done/$mergeTotal")
             }
             // 通知沿用下载中那条 2 秒节流（合并回调很密，别把系统通知刷爆）
             if (now - lastNotifyTs.get() >= notifyThrottleMs) {
@@ -1760,16 +2240,45 @@ class DownloadManager(
             DiagnosticLog.DOWNLOAD, "merge_start", taskId = id, status = "merging", size = mergeTotal,
             summary = "分片数=${chunkFiles.size} 目标=$fileName"
         )
+        DownloadDebugLog.record(id, "开始合并", "分片数=${chunkFiles.size} 目标=$fileName 合计=$mergeTotal")
         reportMergeProgress(0L)
+        // 全量 SHA-256（设置项，默认关）：合并这一遍本来就在读所有字节，顺带算掉即可，不额外读盘。
+        // ★ 只在「下载调试」开着时才算：摘要只写进调试日志，调试关着算它没有任何去处（设置页也把该开关藏了）
+        val fullShaEnabled = settings.downloadDebug && settings.fullFileSha256
         val savedPath = withContext(Dispatchers.IO) {
             val dest = DownloadSaver.openDestination(context, fileName, saveDirProvider())
                 ?: throw IllegalStateException("无法创建下载目标（下载目录不可用）")
             try {
                 val out = dest.open() ?: throw IllegalStateException("无法打开下载目标输出流")
-                val written = out.use {
-                    downloader.mergeChunksToStream(chunkFiles, it, ::reportMergeProgress)
+                val fullDigest = if (fullShaEnabled) MessageDigest.getInstance("SHA-256") else null
+                val sink = if (fullDigest != null) DigestOutputStream(out, fullDigest) else out
+                val written = sink.use {
+                    downloader.mergeChunksToStream(chunkFiles, it, ::reportMergeProgress) { part, hex ->
+                        // ★ 分片级校验：重算该片摘要，与下载时记录的对不上 ⇒ 内容级损坏，拒绝保存
+                        val expected = expectedDigests[part.name]
+                        if (expected != null && expected != hex) {
+                            Log.e(TAG, "finishDownload: id=$id 分片校验失败 ${part.name} 期望=$expected 实际=$hex")
+                            DownloadDebugLog.record(
+                                id, "分片校验失败",
+                                "${part.name} 内容与下载时不一致（期望 $expected 实际 $hex）"
+                            )
+                            throw IllegalStateException(
+                                "分片 ${part.name} 校验失败：内容与下载时不一致（已拒绝保存损坏文件）"
+                            )
+                        }
+                    }
+                }
+                if (fullDigest != null) {
+                    DownloadDebugLog.record(
+                        id, "全量校验",
+                        "SHA-256=${fullDigest.digest().toHexDigest()} 共 $written 字节"
+                    )
                 }
                 if (total > 0 && written != total) {
+                    DownloadDebugLog.record(
+                        id, "校验失败",
+                        "期望 $total 字节，实际 $written 字节（拒绝保存损坏文件）"
+                    )
                     throw IllegalStateException("文件大小校验失败：期望 $total 字节，实际 $written 字节（已拒绝保存损坏文件）")
                 }
                 dest.commit()
@@ -1777,6 +2286,10 @@ class DownloadManager(
             } catch (e: Exception) {
                 // 失败（含 ENOSPC）/取消：删掉半成品，否则残留数据会一直占空间，重试时空间只减不增
                 dest.abort()
+                DownloadDebugLog.record(
+                    id, "合并失败",
+                    "${e.message ?: e.javaClass.simpleName}（已删除半成品，分片保留可重试）"
+                )
                 throw e
             }
         }
@@ -1795,6 +2308,10 @@ class DownloadManager(
         }
         _stats.update { it - id }
         chunkDir.deleteRecursively()
+        DownloadDebugLog.record(
+            id, "清理临时文件",
+            "分片已随合并边写边删；删除分片目录 ${chunkDir.name}（${chunkFiles.size} 片）"
+        )
     }
 
     /**
@@ -1984,7 +2501,8 @@ class DownloadManager(
          * 条）、空闲 30 秒回收，只有真用到大并发时才会存在那么多线程。
          * 必须 core = max 而不是 core = 0 + 无界队列：后者在 ThreadPoolExecutor 里只会养出 1 个 worker。
          */
-        internal val chunkIoDispatcher: CoroutineDispatcher =
+        /** 线程池本体（[chunkIoDispatcher] 的底层）：下载调试页要读它的线程数/活动数/队列长度 */
+        private val chunkIoExecutor: ThreadPoolExecutor =
             ThreadPoolExecutor(
                 MAX_INFLIGHT_CHUNKS,
                 MAX_INFLIGHT_CHUNKS,
@@ -1993,6 +2511,7 @@ class DownloadManager(
                 LinkedBlockingQueue<Runnable>()
             ) { r -> Thread(r, "yunx-chunk-io").apply { isDaemon = true } }
                 .apply { allowCoreThreadTimeOut(true) }
-                .asCoroutineDispatcher()
+
+        internal val chunkIoDispatcher: CoroutineDispatcher = chunkIoExecutor.asCoroutineDispatcher()
     }
 }

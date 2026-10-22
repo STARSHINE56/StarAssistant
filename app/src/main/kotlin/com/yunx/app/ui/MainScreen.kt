@@ -140,6 +140,14 @@ import com.yunx.app.ui.screens.AboutScreen
 import com.yunx.app.ui.screens.BookmarkScreen
 import com.yunx.app.ui.screens.DownloadScreen
 import com.yunx.app.ui.screens.DownloadHistoryScreen
+import com.yunx.app.ui.screens.LinkOpenScreen
+import com.yunx.app.ui.screens.MultiAccountDownloadScreen
+import com.yunx.app.ui.login.VideoLoginScreen
+import com.yunx.app.ui.preview.MediaPreviewScreen
+import com.yunx.app.ui.preview.PreviewLauncher
+import com.yunx.app.data.network.video.VideoPlatform
+import com.yunx.app.data.repository.VideoAccountRepository
+import com.yunx.app.data.repository.VideoParseRepository
 import com.yunx.app.ui.screens.DriveScreen
 import com.yunx.app.ui.screens.OnboardingScreen
 import com.yunx.app.ui.screens.ResolveScreen
@@ -159,6 +167,7 @@ import com.yunx.app.ui.viewmodel.Pan123CloudViewModel
 import com.yunx.app.ui.viewmodel.QuarkAccountViewModel
 import com.yunx.app.ui.viewmodel.QuarkCloudViewModel
 import com.yunx.app.ui.viewmodel.ResolveViewModel
+import com.yunx.app.ui.viewmodel.VideoAccountViewModel
 import com.yunx.app.ui.viewmodel.UCCoudViewModel
 import com.yunx.app.ui.viewmodel.UCAccountViewModel
 import com.yunx.app.ui.viewmodel.XunleiAccountViewModel
@@ -179,8 +188,34 @@ import com.yunx.app.data.network.HttpClients
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MainScreen() {
+fun MainScreen(
+    /** 外部来源请求直接打开的 Tab（如点击实况通知 → 下载页）；null = 用默认「解析」页 */
+    openTab: MainTab? = null,
+
+    /** [openTab] 被消费后回调：调用方负责清空它，避免旋转/重组时重复切页 */
+    onOpenTabConsumed: () -> Unit = {},
+
+    /** 深链接 / 外部分享拿到的待解析文本（分享链接、中文口令、带链接的文案都行）；null = 没有 */
+    incomingLink: String? = null,
+
+    /** [incomingLink] 被解析页接手后回调（调用方清空，避免重组时重复解析） */
+    onIncomingLinkConsumed: () -> Unit = {},
+
+    /** 深链接拿到的直链 / 磁力：走下载页「添加下载任务」弹窗预填 */
+    incomingAddUrl: String? = null,
+
+    /** [incomingAddUrl] 被下载页接手后回调 */
+    onIncomingAddUrlConsumed: () -> Unit = {}
+) {
     var currentTab by rememberSaveable { mutableStateOf(MainTab.Resolve) }
+
+    // 实况通知等外部来源请求切 Tab：读一次即消费（清空由调用方做）
+    LaunchedEffect(openTab) {
+        if (openTab != null) {
+            currentTab = openTab
+            onOpenTabConsumed()
+        }
+    }
     var showQuarkLogin by rememberSaveable { mutableStateOf(false) }
     var showUCLogin by rememberSaveable { mutableStateOf(false) }
     var showXunleiLogin by rememberSaveable { mutableStateOf(false) }
@@ -204,6 +239,13 @@ fun MainScreen() {
     var showGuangYaLogin by rememberSaveable { mutableStateOf(false) }
     var showILanzouLogin by rememberSaveable { mutableStateOf(false) }
     var showLanzouLogin by rememberSaveable { mutableStateOf(false) }
+    // 视频平台登录页：null = 不展示；否则为正在登录的平台
+    var videoLoginPlatform by rememberSaveable { mutableStateOf<VideoPlatform?>(null) }
+    // 本次视频登录是否算「新增账号」（账号弹窗点「添加账号」时为 true，登录后落成新的一行）
+    var videoLoginAsNewAccount by rememberSaveable { mutableStateOf(false) }
+    // 叠加页：链接唤起 / 多账号下载
+    var showLinkOpen by rememberSaveable { mutableStateOf(false) }
+    var showMultiAccountDownload by rememberSaveable { mutableStateOf(false) }
     val saveableStateHolder = rememberSaveableStateHolder()
 
     val context = LocalContext.current
@@ -675,6 +717,23 @@ fun MainScreen() {
         ILanzouResolveRepository(ilanzouApi, ilanzouRepository)
     }
     val githubApi = remember { GitHubApi(tokenProvider = { GitHubTokenStore.getToken(context) }) }
+    // 视频解析账号：账号页「视频解析」区的登录态与账号管理（所有视频平台共用一张表、一个 Cookie）
+    val videoAccountViewModel: VideoAccountViewModel = viewModel(
+        factory = VideoAccountViewModel.Factory(context)
+    )
+    // 视频区需要的两份数据：各平台当前账号（决定「未登录 / 昵称 / 备注」）与全部账号（多账号计数、弹窗列表）
+    val videoLoginState by videoAccountViewModel.loginState.collectAsState()
+    val videoAccounts by videoAccountViewModel.accounts.collectAsState()
+
+    // 视频解析仓库：解析页「视频解析」入口使用（与视频账号页共用同一份 Cookie 账号表）
+    val videoParseRepository = remember {
+        VideoParseRepository(
+            VideoAccountRepository(
+                db.videoAccountDao()
+            )
+        )
+    }
+
     val resolveViewModel: ResolveViewModel = viewModel(
         factory = ResolveViewModel.Factory(
             repository,
@@ -696,7 +755,13 @@ fun MainScreen() {
             downloadManager,
             db.bookmarkDao(), githubApi,
             mirrorPrefixProvider = { settings.githubMirrorPrefix ?: UpdateChecker.MIRROR_PREFIX },
-            noSaveDownloadProvider = { settings.quarkNoSaveDownload }
+            noSaveDownloadProvider = { settings.quarkNoSaveDownload },
+            // 多账号下载 / 单文件多源分片（两个实验性开关）：实时读设置，改完立即生效
+            multiAccountDownloadProvider = { settings.multiAccountDownload },
+            // 用 multiSourceActive()：C2 依赖 C1，关掉 C1 后这里自动为 false
+            multiSourceDownloadProvider = { settings.multiSourceActive() },
+            // 视频解析仓库（抖音/小红书/快手/微博/AcFun/B站/Pixiv）
+            videoParseRepository = videoParseRepository
         )
     )
     val downloadViewModel: DownloadViewModel = viewModel(
@@ -760,6 +825,36 @@ fun MainScreen() {
                     .apply()
                 showOnboarding = false
             }
+        )
+        return
+    }
+
+    // 视频平台登录页：全屏覆盖（通用 WebView Cookie 登录页，按 platform 参数化）
+    val videoLoginTarget = videoLoginPlatform
+    if (videoLoginTarget != null) {
+        VideoLoginScreen(
+            platform = videoLoginTarget,
+            viewModel = videoAccountViewModel,
+            newAccount = videoLoginAsNewAccount,
+            onBack = {
+                videoLoginPlatform = null
+                videoLoginAsNewAccount = false
+            },
+            // 保存成功后登录态 Flow 会自动刷新账号页，这里只需关掉登录页
+            onSaved = {
+                videoLoginPlatform = null
+                videoLoginAsNewAccount = false
+            }
+        )
+        return
+    }
+
+    // 在线预览页：全屏覆盖，优先级最高（打开即独占屏幕）
+    val previewRequest by PreviewLauncher.request.collectAsState()
+    if (previewRequest != null) {
+        MediaPreviewScreen(
+            request = previewRequest!!,
+            onClose = { PreviewLauncher.dismiss() }
         )
         return
     }
@@ -993,7 +1088,10 @@ fun MainScreen() {
                         c139CloudViewModel,
                         ucCloudViewModel,
                         pan123CloudViewModel, pan115CloudViewModel, guangyaCloudViewModel,
-                        bookmarkViewModel = bookmarkViewModel, onOpenBookmarks = { showBookmarks = true }
+                        bookmarkViewModel = bookmarkViewModel, onOpenBookmarks = { showBookmarks = true },
+                        // 深链接 / 分享进来的链接：解析页填进输入框并自动发起解析
+                        incomingLink = incomingLink,
+                        onIncomingLinkConsumed = onIncomingLinkConsumed
                     )
                     MainTab.Drive -> DriveScreen(
                         scrollBehavior = scrollBehavior,
@@ -1037,9 +1135,32 @@ fun MainScreen() {
                         onC139Login = { showC139Login = true },
                         onC139Logout = { c139ViewModel.logout() },
                         onPan123Login = { showPan123Login = true },
-                        onPan123Logout = { pan123ViewModel.logout() }
+                        onPan123Logout = { pan123ViewModel.logout() },
+                        // 视频解析区：登录态 / 账号列表 / 登录与管理回调
+                        videoLoginState = videoLoginState,
+                        videoAccounts = videoAccounts,
+                        onVideoLogin = { platform ->
+                            videoLoginAsNewAccount = false
+                            videoLoginPlatform = platform
+                        },
+                        onVideoAddAccount = { platform ->
+                            videoLoginAsNewAccount = true
+                            videoLoginPlatform = platform
+                        },
+                        onVideoSetPrimary = { platform, id -> videoAccountViewModel.setPrimary(platform, id) },
+                        onVideoRename = { id, remark -> videoAccountViewModel.updateRemark(id, remark) },
+                        onVideoRemove = { id -> videoAccountViewModel.remove(id) },
+                        onVideoRemoveAll = { platform -> videoAccountViewModel.removeAll(platform) }
                     )
-                    MainTab.Download -> DownloadScreen(scrollBehavior, downloadViewModel)
+                    MainTab.Download -> DownloadScreen(
+                        scrollBehavior,
+                        downloadViewModel,
+                        // 下载调试开关：开启后下载页长按任务可进「调试信息」页
+                        downloadDebug = ThemeController.downloadDebug,
+                        // 深链接进来的直链 / 磁力：预填「添加下载任务」弹窗，由用户确认后入队
+                        incomingAddUrl = incomingAddUrl,
+                        onIncomingAddUrlConsumed = onIncomingAddUrlConsumed
+                    )
                     MainTab.Settings -> SettingsScreen(
                         scrollBehavior = scrollBehavior,
                         onThemeClick = { showTheme = true },
@@ -1047,6 +1168,8 @@ fun MainScreen() {
                         onSupportClick = { showSupport = true },
                         backupManager = backupManager,
                         onGopeedClick = { showGopeed = true },
+                        onLinkOpenClick = { showLinkOpen = true },
+                        onMultiAccountDownloadClick = { showMultiAccountDownload = true },
                         onConcurrencyChanged = { downloadManager.updateConcurrencyLimit() },
                         onCheckUpdate = {
                             SnackbarController.show("正在检查更新…")
@@ -1180,6 +1303,30 @@ fun MainScreen() {
     ) {
         ThemeScreen(
             onBack = { showTheme = false }
+        )
+    }
+
+    // 链接唤起（深链接注册项）：叠加覆盖层
+    AnimatedVisibility(
+        visible = showLinkOpen,
+        enter = fadeIn(tween(220)) + scaleIn(tween(220), initialScale = 0.96f),
+        exit = fadeOut(tween(160)) + scaleOut(tween(160), targetScale = 0.96f),
+        modifier = Modifier.fillMaxSize()
+    ) {
+        LinkOpenScreen(
+            onBack = { showLinkOpen = false }
+        )
+    }
+
+    // 多账号下载（两个实验性开关）：叠加覆盖层
+    AnimatedVisibility(
+        visible = showMultiAccountDownload,
+        enter = fadeIn(tween(220)) + scaleIn(tween(220), initialScale = 0.96f),
+        exit = fadeOut(tween(160)) + scaleOut(tween(160), targetScale = 0.96f),
+        modifier = Modifier.fillMaxSize()
+    ) {
+        MultiAccountDownloadScreen(
+            onBack = { showMultiAccountDownload = false }
         )
     }
 

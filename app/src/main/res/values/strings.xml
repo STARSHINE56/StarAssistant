@@ -4,4 +4,6 @@
     <string name="settings_about_app">关于%1$s</string>
     <string name="settings_battery_optimization_message">为确保锁屏后下载不中断，建议将%1$s加入「忽略电池优化」白名单。是否前往系统设置？</string>
     <string name="platform_mobile_cloud">移动云盘</string>
+    <!-- 系统「选中文本 → 更多」菜单里显示的条目名（见 AndroidManifest 的 ProcessTextLink） -->
+    <string name="process_text_action">用星辰助手解析</string>
 </resources>

@@ -17,12 +17,12 @@ android {
         targetSdk = 34
 
         versionCode = providers.gradleProperty("VERSION_CODE")
-            .orElse("1001012")
+            .orElse("1001020")
             .get()
             .toInt()
 
         versionName = providers.gradleProperty("VERSION_NAME")
-            .orElse("1.1.2")
+            .orElse("1.2.0")
             .get()
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -96,7 +96,21 @@ dependencies {
     implementation(libs.room.ktx)
     ksp(libs.room.compiler)
 
+    // GitHub README 的 GFM 渲染（表格/嵌套列表/代码高亮/折叠/图片）
+    implementation(libs.markdownRenderer)
+
+    // 在线预览/播放：ExoPlayer（可带请求头、支持 HLS）+ 官方 PlayerView
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.ui)
+    implementation(libs.androidx.media3.hls)
+    // 图片加载（封面/图集；网络走 OkHttp，可逐请求带 Referer/Cookie）
+    implementation(libs.androidx.coil.compose)
+    implementation(libs.androidx.coil.network.okhttp)
+    // mp4 分轨合并（B 站 DASH 音视频合轨）：纯 Java 实现，不需要 ffmpeg
+    implementation(libs.mp4parser)
+
     implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.webkit)   // 登录 WebView 关闭 X-Requested-With（见 DiagnosticWebViewClient.suppressRequestedWithHeader）
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
 

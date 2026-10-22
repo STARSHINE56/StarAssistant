@@ -290,6 +290,10 @@ class XunleiApi(
                     .header("Origin", "https://pan.xunlei.com")
                     .header("Referer", "https://pan.xunlei.com/")
                     .header("User-Agent", XunleiWebCredential.DESKTOP_UA)
+                    // 桌面 UA 必须同步这套 client hints：只改 UA 不同步 Sec-CH-UA 会被判成移动端而冲突
+                    .header("Sec-Ch-Ua", XunleiWebCredential.DESKTOP_SEC_CH_UA)
+                    .header("Sec-Ch-Ua-Mobile", XunleiWebCredential.DESKTOP_SEC_CH_UA_MOBILE)
+                    .header("Sec-Ch-Ua-Platform", XunleiWebCredential.DESKTOP_SEC_CH_UA_PLATFORM)
                     .post(body.toRequestBody(jsonMediaType))
                     .build()
             } else {
@@ -343,7 +347,10 @@ class XunleiApi(
             client.newCall(request).execute().use { resp ->
                 if (!resp.isSuccessful) return@use false
                 val json = JSONObject(resp.body?.string() ?: "{}")
-                json.optJSONObject("data") != null
+                // 该接口的返回结构随通道不同：App 通道包在 data 里，网页（webToken）通道是**顶层**
+                // kind/quota（没有 data 包裹，实测 `{kind:"drive#about",quota:{...}}`）。只判 data 会把
+                // 网页登录的合法 token 误判成无效 →「登录后提示未检测到登录态」。两种结构都接受。
+                json.optJSONObject("data") != null || json.optString("kind") == "drive#about"
             }
         }.getOrDefault(false)
     }
