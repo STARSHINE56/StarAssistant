@@ -246,6 +246,8 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
                         onCongestion?.invoke(1000L)
                     }
                 }
+                // try/catch 整体是表达式：IOException 分支必须产出 ChunkResult?
+                null
             }
 
             when (res) {

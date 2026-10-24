@@ -134,19 +134,6 @@ fun SettingsScreen(
     onDownloadUpdateApk: (url: String, fileName: String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var showThreadsDialog by remember { mutableStateOf(false) }
-    var showLogDialog by remember { mutableStateOf(false) }
-    // 认证信息导出弹窗（AES 加密 + 导出范围）
-    var showExportAuthDialog by remember { mutableStateOf(false) }
-    // 认证信息导入：加密文件内容（非空时弹解密密码框）
-    var pendingImportContent by remember { mutableStateOf<String?>(null) }
-    var showImportAuthDialog by remember { mutableStateOf(false) }
-    // 导出/导入处理中（PBKDF2 21万次迭代派生密钥，偶发 1~3s，期间显示加载弹窗）
-    var isExporting by remember { mutableStateOf(false) }
-    var isImporting by remember { mutableStateOf(false) }
-    // 按平台线程数：二级弹窗当前选择的平台
-    var selectedThreadPlatform by remember { mutableStateOf(threadPlatforms.first()) }
-    var showPlatformThreadDialog by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
