@@ -18,6 +18,7 @@
 
 package com.yunx.app.ui.login
 
+import android.annotation.SuppressLint
 import android.graphics.Bitmap
 import android.util.Log
 import android.webkit.ConsoleMessage
@@ -142,6 +143,9 @@ internal open class DiagnosticWebChromeClient : WebChromeClient() {
  * 实测确认：设成空 allow list 后，Pixiv 登录页的 XHR 仍然带着 `x-requested-with: com.yunx.app`。
  * 保留调用只是「不支持的版本上静默跳过、支持的版本上尽力而为」，不要再指望它能摘掉这个头。
  */
+// RestrictedApi：REQUESTED_WITH_HEADER_ALLOW_LIST 属于 androidx.webkit 的内部 allowlist API，
+// 我们只在 isFeatureSupported 为真时调用（不支持的版本静默跳过），并有上面那段实测说明兜底。
+@SuppressLint("RestrictedApi")
 internal fun WebSettings.suppressRequestedWithHeader() {
     if (WebViewFeature.isFeatureSupported(WebViewFeature.REQUESTED_WITH_HEADER_ALLOW_LIST)) {
         WebSettingsCompat.setRequestedWithHeaderOriginAllowList(this, emptySet())
