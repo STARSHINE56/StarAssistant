@@ -56,9 +56,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import com.yunx.app.ui.theme.ListGroupPos
 import com.yunx.app.ui.theme.ThemeController
-import com.yunx.app.ui.theme.listGroupShape
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
@@ -635,7 +633,6 @@ fun SettingsScreen(
         SectionLabel("认证备份")
         SettingsItem(
             icon = Icons.Outlined.Backup,
-            shape = listGroupShape(ListGroupPos.FIRST),
             title = "导出认证信息",
             description = "使用至少 8 位口令加密网盘与视频平台的 Cookie/JWT 后导出",
             onClick = { showExportAuthDialog = true }
@@ -645,7 +642,6 @@ fun SettingsScreen(
 
         SettingsItem(
             icon = Icons.Outlined.Restore,
-            shape = listGroupShape(ListGroupPos.LAST),
             title = "导入认证信息",
             description = "选择加密或明文的认证备份文件，恢复网盘与视频平台登录",
             onClick = { importLauncher.launch(arrayOf("application/json", "application/octet-stream", "*/*")) }
@@ -656,9 +652,8 @@ fun SettingsScreen(
         SectionLabel("链接唤起")
         SettingsItem(
             icon = Icons.Outlined.Link,
-            shape = listGroupShape(ListGroupPos.SINGLE),
             title = "网盘链接一键唤起",
-            description = "点分享链接（或分享到云析）直接进来解析；可按平台逐个开关",
+            description = "点分享链接（或分享到星辰助手）直接进来解析；可按平台逐个开关",
             onClick = onLinkOpenClick
         )
 
