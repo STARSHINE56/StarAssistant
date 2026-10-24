@@ -78,36 +78,6 @@ fun DownloadLinkDialog(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                // 直链原样展示（长按可复制）：出问题时用户能自己核对是不是拿错了地址
-                Text(
-                    text = link.downloadUrl,
-                    modifier = Modifier
-                        .padding(12.dp)
-                        .combinedClickable(
-                            onClick = {},
-                            onLongClickLabel = "复制下载链接",
-                            onLongClick = {
-                                copyToClipboard(context, link.downloadUrl)
-                                SnackbarController.show("下载链接已复制")
-                            }
-                        ),
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 11.sp,
-                        lineHeight = 15.sp
-                    ),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 4,
-                    overflow = TextOverflow.Ellipsis
-                )
-                TextButton(onClick = {
-                    copyToClipboard(context, link.downloadUrl)
-                    SnackbarController.show("下载链接已复制")
-                }) {
-                    Icon(Icons.Outlined.ContentCopy, contentDescription = null)
-                    Spacer(Modifier.width(6.dp))
-                    Text("复制下载链接")
-                }
                 Text(
                     text = "点击「开始下载」后，将保存到 Download 目录。",
                     modifier = Modifier.padding(top = 12.dp),

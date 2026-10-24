@@ -16,12 +16,6 @@ import com.yunx.app.data.db.BaiduAccountDao
 import com.yunx.app.data.db.BaiduAccountEntity
 import com.yunx.app.data.db.C139AccountDao
 import com.yunx.app.data.db.C139AccountEntity
-import com.yunx.app.data.db.GuangYaAccountDao
-import com.yunx.app.data.db.GuangYaAccountEntity
-import com.yunx.app.data.db.ILanzouAccountDao
-import com.yunx.app.data.db.ILanzouAccountEntity
-import com.yunx.app.data.db.LanzouAccountDao
-import com.yunx.app.data.db.LanzouAccountEntity
 import com.yunx.app.data.db.Pan115AccountDao
 import com.yunx.app.data.db.Pan115AccountEntity
 import com.yunx.app.data.db.Pan123AccountDao

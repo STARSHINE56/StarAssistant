@@ -93,6 +93,10 @@ import com.yunx.app.ui.screens.AnnouncementScreen
 import com.yunx.app.ui.screens.AnnouncementUnreadBadge
 import com.yunx.app.ui.screens.DownloadEngineScreen
 import com.yunx.app.ui.viewmodel.AnnouncementViewModel
+import com.yunx.app.data.repository.AccountDirectory
+import com.yunx.app.ui.viewmodel.MultiAccountViewModel
+import com.yunx.app.data.download.DownloadPlatform
+import com.yunx.app.ui.theme.ThemeController
 import com.yunx.app.ui.viewmodel.GuangYaAccountViewModel
 import com.yunx.app.ui.viewmodel.GuangYaCloudViewModel
 import com.yunx.app.ui.viewmodel.ILanzouAccountViewModel
@@ -551,6 +555,10 @@ fun MainScreen(
     )
     val lanzouViewModel: LanzouAccountViewModel = viewModel(
         factory = LanzouAccountViewModel.Factory(lanzouRepository)
+    )
+    // 多账号：账号列表 / 设主账号 / 改备注 / 退出 的统一入口
+    val multiAccountViewModel: MultiAccountViewModel = viewModel(
+        factory = MultiAccountViewModel.Factory(AccountDirectory(db))
     )
     val pan115LoginState = remember { pan115Repository.observeAccount().map { it != null } }
     val guangyaLoginState = remember { guangyaRepository.observeAccount().map { it != null } }
@@ -1111,10 +1119,27 @@ fun MainScreen(
                         pan123CloudViewModel = pan123CloudViewModel,
                         pan115CloudViewModel = pan115CloudViewModel, guangyaCloudViewModel = guangyaCloudViewModel,
                         ilanzouCloudViewModel = ilanzouCloudViewModel, lanzouCloudViewModel = lanzouCloudViewModel,
-                        onPan115Login = { showPan115Login = true }, onPan115Logout = { pan115ViewModel.logout() },
-                        onGuangYaLogin = { showGuangYaLogin = true }, onGuangYaLogout = { guangyaViewModel.logout() },
-                        onILanzouLogin = { showILanzouLogin = true }, onILanzouLogout = { ilanzouViewModel.logout() },
-                        onLanzouLogin = { showLanzouLogin = true }, onLanzouLogout = { lanzouViewModel.logout() },
+                        onPan115Login = { showPan115Login = true },
+                        onGuangYaLogin = { showGuangYaLogin = true },
+                        onILanzouLogin = { showILanzouLogin = true },
+                        onLanzouLogin = { showLanzouLogin = true },
+                        multiAccountViewModel = multiAccountViewModel,
+                        onAddAccount = { platform ->
+                            // 「添加账号」：先清 WebView 登录态，再打上「新增」标记并打开该平台登录页
+                            multiAccountViewModel.prepareAddAccount()
+                            when (platform) {
+                                DownloadPlatform.QUARK -> { viewModel.beginAddAccount(); showQuarkLogin = true }
+                                DownloadPlatform.UC -> { ucViewModel.beginAddAccount(); showUCLogin = true }
+                                DownloadPlatform.XUNLEI -> { xunleiViewModel.beginAddAccount(); showXunleiLogin = true }
+                                DownloadPlatform.BAIDU -> { baiduViewModel.beginAddAccount(); showBaiduLogin = true }
+                                DownloadPlatform.C139 -> { c139ViewModel.beginAddAccount(); showC139Login = true }
+                                DownloadPlatform.PAN123 -> { pan123ViewModel.beginAddAccount(); showPan123Login = true }
+                                DownloadPlatform.PAN115 -> { pan115ViewModel.beginAddAccount(); showPan115Login = true }
+                                DownloadPlatform.GUANGYA -> { guangyaViewModel.beginAddAccount(); showGuangYaLogin = true }
+                                DownloadPlatform.ILANZOU -> { ilanzouViewModel.beginAddAccount(); showILanzouLogin = true }
+                                DownloadPlatform.LANZOU -> { lanzouViewModel.beginAddAccount(); showLanzouLogin = true }
+                            }
+                        },
                         githubHasToken = githubHasTokenState,
                         onGitHubTokenClick = { showGitHubTokenDialog = true },
                         onGitHubBrowseHome = { scope.launch {
@@ -1124,18 +1149,12 @@ fun MainScreen(
                         onGitHubClearToken = { GitHubTokenStore.setToken(context, null); githubHasTokenState = false },
                         driveQuotaViewModel = driveQuotaViewModel,
                         onQuarkLogin = { showQuarkLogin = true },
-                        onQuarkLogout = { viewModel.logout() },
                         onDownloadStarted = { currentTab = MainTab.Download },
                         onUCLogin = { showUCLogin = true },
-                        onUCLogout = { ucViewModel.logout() },
                         onXunleiLogin = { showXunleiLogin = true },
-                        onXunleiLogout = { xunleiViewModel.logout() },
                         onBaiduLogin = { showBaiduLogin = true },
-                        onBaiduLogout = { baiduViewModel.logout() },
                         onC139Login = { showC139Login = true },
-                        onC139Logout = { c139ViewModel.logout() },
                         onPan123Login = { showPan123Login = true },
-                        onPan123Logout = { pan123ViewModel.logout() },
                         // 视频解析区：登录态 / 账号列表 / 登录与管理回调
                         videoLoginState = videoLoginState,
                         videoAccounts = videoAccounts,
