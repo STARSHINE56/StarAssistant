@@ -56,7 +56,9 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import com.yunx.app.ui.theme.ListGroupPos
 import com.yunx.app.ui.theme.ThemeController
+import com.yunx.app.ui.theme.listGroupShape
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
@@ -132,6 +134,19 @@ fun SettingsScreen(
     onDownloadUpdateApk: (url: String, fileName: String) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var showThreadsDialog by remember { mutableStateOf(false) }
+    var showLogDialog by remember { mutableStateOf(false) }
+    // 认证信息导出弹窗（AES 加密 + 导出范围）
+    var showExportAuthDialog by remember { mutableStateOf(false) }
+    // 认证信息导入：加密文件内容（非空时弹解密密码框）
+    var pendingImportContent by remember { mutableStateOf<String?>(null) }
+    var showImportAuthDialog by remember { mutableStateOf(false) }
+    // 导出/导入处理中（PBKDF2 21万次迭代派生密钥，偶发 1~3s，期间显示加载弹窗）
+    var isExporting by remember { mutableStateOf(false) }
+    var isImporting by remember { mutableStateOf(false) }
+    // 按平台线程数：二级弹窗当前选择的平台
+    var selectedThreadPlatform by remember { mutableStateOf(threadPlatforms.first()) }
+    var showPlatformThreadDialog by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -274,8 +289,7 @@ fun SettingsScreen(
             SnackbarController.show("下载保存目录已更新")
         }
     }
-
-    // 网盘认证文件选择器
+    // 导入认证信息文件选择器：选择后先判断是否加密备份，加密则弹密码框
     val importLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -631,32 +645,34 @@ fun SettingsScreen(
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        SectionLabel("网盘认证")
-
+        SectionLabel("认证备份")
         SettingsItem(
             icon = Icons.Outlined.Backup,
-            title = "导出网盘认证",
-            description = "使用至少 8 位口令加密 Cookie/JWT 后导出",
-            onClick = {
-                showExportAuthDialog = true
-            }
+            shape = listGroupShape(ListGroupPos.FIRST),
+            title = "导出认证信息",
+            description = "使用至少 8 位口令加密网盘与视频平台的 Cookie/JWT 后导出",
+            onClick = { showExportAuthDialog = true }
         )
 
         Spacer(modifier = Modifier.height(6.dp))
 
         SettingsItem(
             icon = Icons.Outlined.Restore,
-            title = "导入网盘认证",
-            description = "选择加密或明文的认证备份文件，恢复网盘登录",
-            onClick = {
-                importLauncher.launch(
-                    arrayOf(
-                        "application/json",
-                        "application/octet-stream",
-                        "*/*"
-                    )
-                )
-            }
+            shape = listGroupShape(ListGroupPos.LAST),
+            title = "导入认证信息",
+            description = "选择加密或明文的认证备份文件，恢复网盘与视频平台登录",
+            onClick = { importLauncher.launch(arrayOf("application/json", "application/octet-stream", "*/*")) }
+        )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        SectionLabel("链接唤起")
+        SettingsItem(
+            icon = Icons.Outlined.Link,
+            shape = listGroupShape(ListGroupPos.SINGLE),
+            title = "网盘链接一键唤起",
+            description = "点分享链接（或分享到云析）直接进来解析；可按平台逐个开关",
+            onClick = onLinkOpenClick
         )
 
         Spacer(modifier = Modifier.height(24.dp))
@@ -973,7 +989,7 @@ fun SettingsScreen(
         )
     }
 
-    // 导出网盘认证
+    // 导出认证信息弹窗（AES 加密密码 + 导出范围）
     if (showExportAuthDialog) {
         ExportAuthDialog(
             onDismiss = {
@@ -1400,7 +1416,7 @@ fun SettingsScreen(
     }
 }
 
-/** 导出网盘认证弹窗 */
+/** 导出认证弹窗：AES 加密密码 + 导出范围（仅已登录 / 全部绑定） */
 @Composable
 private fun ExportAuthDialog(
     onDismiss: () -> Unit,
@@ -1415,9 +1431,7 @@ private fun ExportAuthDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = {
-            Text("导出网盘认证")
-        },
+        title = { Text("导出认证信息") },
         text = {
             Column(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -1469,6 +1483,8 @@ private fun ExportAuthDialog(
                         text = "仅导出当前已登录的网盘",
                         style = MaterialTheme.typography.bodyMedium
                     )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("仅导出当前已登录的账号", style = MaterialTheme.typography.bodyMedium)
                 }
 
                 Row(
@@ -1490,6 +1506,8 @@ private fun ExportAuthDialog(
                         text = "导出全部绑定的网盘",
                         style = MaterialTheme.typography.bodyMedium
                     )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("导出全部绑定的账号", style = MaterialTheme.typography.bodyMedium)
                 }
             }
         },
@@ -1523,9 +1541,7 @@ private fun ImportAuthDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = {
-            Text("导入网盘认证")
-        },
+        title = { Text("导入认证信息") },
         text = {
             Column(
                 verticalArrangement = Arrangement.spacedBy(12.dp)

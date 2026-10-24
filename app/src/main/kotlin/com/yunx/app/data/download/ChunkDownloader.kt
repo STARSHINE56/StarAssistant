@@ -107,6 +107,23 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
         calls?.forEach { call -> runCatching { call.cancel() } }
     }
 
+    /**
+     * 分片 key → 该分片当前那条请求（key 形如 `"<taskId>:<chunkKey>"`）。
+     *
+     * ★ 为什么必须有它（2026-10-23 用户实测「点重连没用」）：抢占/重连原先只置位 [PreemptedException] 那套标志，
+     *   而标志位是在**读循环里**检查的 —— 连接被 CDN 挂住时 `input.read()` 会一直阻塞到读超时，
+     *   循环根本没机会跑，于是标志位形同虚设、界面看着就是「点了没反应」。
+     *   真正生效的前提是**主动 cancel 这条调用**，让阻塞的 read 立刻抛 IOException。
+     */
+    private val activeChunkCalls = ConcurrentHashMap<String, Call>()
+
+    /** 掐断某个在飞分片的连接（手动「重连」与看门狗抢占都走这里） */
+    fun cancelChunkCall(taskId: Long, chunkKey: String) {
+        activeChunkCalls.remove("$taskId:$chunkKey")?.let { call ->
+            runCatching { call.cancel() }
+        }
+    }
+
     // ---------- 总大小探测 ----------
 
     suspend fun getTotalSize(url: String, headers: Map<String, String>): Long? =
@@ -183,6 +200,8 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
          * 所以成功返回时该摘要是「整个 part 文件」的摘要，上层合并时逐片重算比对即可。
          */
         contentDigest: MessageDigest? = null,
+        /** 调用方给这片起的名字（如 `m12` / `seg@1234` / `retry@1234`）：用于把这条请求登记进 [activeChunkCalls]，供「重连」主动掐断 */
+        chunkKey: String = "",
         onBytes: suspend (Long) -> Unit
     ): ChunkResult = withContext(DownloadManager.chunkIoDispatcher) {
         val attempts = CHUNK_RETRIES + RANGE_RETRIES
@@ -198,7 +217,10 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
 
             var preempted = false
             val res = try {
-                doChunkAttempt(taskId, url, from, end, unknownTotal, partFile, headers, existing, preempt, expectedTotal, expectedEtag, onCongestion, contentDigest, onBytes)
+                doChunkAttempt(
+                    taskId, url, from, end, unknownTotal, partFile, headers, chunkKey,
+                    existing, preempt, expectedTotal, expectedEtag, onCongestion, contentDigest, onBytes
+                )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: PreemptedException) {
@@ -210,13 +232,20 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
             } catch (e: SourceChangedException) {
                 throw e
             } catch (e: IOException) {
-                if (preempt?.get() == true && isActive) { preempt.set(false); preempted = true }
-                Log.w(TAG, "downloadChunk: task=$taskId 尝试${attempt + 1} IO异常: ${e.message}")
-                if (!isActive) throw CancellationException("下载被取消", e)
-                if (!preempted && attempt >= 1 && DownloadFailurePolicy.isNetworkFailure(e)) {
-                    onCongestion?.invoke(1000L)
+                // ★ 抢占/「重连」把这条请求 cancel 了 → 阻塞中的 read 立刻抛 IOException。
+                //   这正是「置位标志位」做不到的事（连接被挂住时读循环根本轮不到检查标志）。按「换连接」处理：
+                //   清标志、不退避、立刻用新连接从已写字节续传；下面 when 分支会跳过退避（见 preempted）。
+                if (preempt?.get() == true && isActive) {
+                    preempt.set(false)
+                    preempted = true
+                    Log.w(TAG, "downloadChunk: task=$taskId 抢占生效（连接已掐断），换连接续传（已写 ${partFile.length()} 字节）")
+                } else {
+                    Log.w(TAG, "downloadChunk: task=$taskId 尝试${attempt + 1} IO异常: ${e.message}")
+                    if (!isActive) throw CancellationException("下载被取消", e)
+                    if (attempt >= 1 && DownloadFailurePolicy.isNetworkFailure(e)) {
+                        onCongestion?.invoke(1000L)
+                    }
                 }
-                null
             }
 
             when (res) {
@@ -245,6 +274,8 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
         unknownTotal: Boolean,
         partFile: File,
         headers: Map<String, String>,
+        /** 分片 key（登记/摘除 [activeChunkCalls] 用，空 = 不登记） */
+        chunkKey: String,
         existing: Long,
         preempt: AtomicBoolean?,
         expectedTotal: Long?,
@@ -263,6 +294,8 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
         val callSet = synchronized(activeCalls) {
             activeCalls.getOrPut(taskId) { newCallSet() }.also { it.add(call) }
         }
+        // ★ 逐分片登记：抢占/「重连」据此主动掐断这条连接（只置标志位对挂住的连接无效）
+        if (chunkKey.isNotBlank()) activeChunkCalls["$taskId:$chunkKey"] = call
         val cancelHandle = coroutineContext[Job]?.invokeOnCompletion { call.cancel() }
         val monitor = monitorCall(call, coroutineContext[Job], preempt)
         try {
@@ -331,6 +364,8 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
                 callSet.remove(call)
                 if (callSet.isEmpty() && activeCalls[taskId] === callSet) activeCalls.remove(taskId)
             }
+            // ★ 摘除逐分片登记（仅当仍指向本 Call）：否则旧 Call 常驻到任务结束，还可能把「重连」掐到过期连接上
+            if (chunkKey.isNotBlank()) activeChunkCalls.remove("$taskId:$chunkKey", call)
             cancelHandle?.dispose()
             monitor.cancel()
         }

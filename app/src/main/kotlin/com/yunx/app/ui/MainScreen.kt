@@ -329,7 +329,7 @@ fun MainScreen(
     val lanzouRepository = remember {
         LanzouAccountRepository(db.lanzouAccountDao(), lanzouApi)
     }
-    // 网盘认证备份：打包/恢复各平台凭证
+    // 认证备份：打包/恢复各平台凭证（网盘 + 视频解析平台）
     val backupManager = remember {
         AuthBackupManager(
             db.quarkAccountDao(),
@@ -337,8 +337,12 @@ fun MainScreen(
             db.xunleiAccountDao(),
             db.baiduAccountDao(),
             db.c139AccountDao(),
-            db.pan123AccountDao(), db.pan115AccountDao(),
-            db.guangyaAccountDao(), db.ilanzouAccountDao(), db.lanzouAccountDao()
+            db.pan123AccountDao(),
+            db.pan115AccountDao(),
+            db.guangyaAccountDao(),
+            db.ilanzouAccountDao(),
+            db.lanzouAccountDao(),
+            db.videoAccountDao()
         )
     }
     // 下载管理器：OkHttp 分片下载器 + Room 任务持久化 + 可配置线程数（设置页动态生效）
@@ -591,6 +595,10 @@ fun MainScreen(
         else xunleiApi.refreshToken(acc.refreshToken, deviceId, acc.authType)?.also { (at, nrt) ->
             xunleiRepository.updateTokens(at, nrt)
         }
+    }
+    // 网页登录的 captcha：本地 9 盐签名现换（快、后台可用），签名被拒才回退网页会话
+    xunleiApi.webCaptchaRefresher = { deviceId, action ->
+        xunleiRepository.refreshWebCaptcha(deviceId, action)
     }
     // 迅雷云盘浏览：点击已登录的迅雷卡片打开（access_token/设备指纹/captcha 从数据库读取）
     val xunleiCloudViewModel: XunleiCloudViewModel = viewModel(

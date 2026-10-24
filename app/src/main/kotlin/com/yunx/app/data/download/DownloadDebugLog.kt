@@ -18,6 +18,7 @@
 
 package com.yunx.app.data.download
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
@@ -165,6 +166,8 @@ object DownloadDebugLog {
     }
 
     /** 蜂窝代际（5G/4G/3G/2G）：Android 11+ 需要 READ_PHONE_STATE，未授权时明说「未区分」而不是猜 */
+    // lint 无法穿透 runCatching 的分支判断：权限已在函数内显式 checkSelfPermission 校验
+    @SuppressLint("MissingPermission")
     private fun cellularGeneration(context: Context): String = runCatching {
         val granted = Build.VERSION.SDK_INT < Build.VERSION_CODES.R ||
             context.checkSelfPermission(android.Manifest.permission.READ_PHONE_STATE) ==

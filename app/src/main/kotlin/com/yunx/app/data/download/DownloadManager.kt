@@ -41,6 +41,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 import com.yunx.app.data.network.HttpClients
 import java.io.File
 import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.io.IOException
 import java.security.DigestOutputStream
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
@@ -81,6 +83,8 @@ data class ChunkDebug(
     /** 看门狗上一次采样算出的瞬时速度（字节/秒） */
     val bps: Long,
     val elapsedMs: Long,
+    /** 距上一次「收到字节」过去了多久（毫秒）：0 附近=正在推进，持续增大=连接被挂住 */
+    val idleMs: Long,
     /** 已被「慢连接抢占」换连接的次数 */
     val preemptCount: Int,
     /** 是否已置位抢占标志（下一次检查点会断开换连接） */
@@ -106,6 +110,9 @@ data class DownloadResourceDebug(
 )
 
 private const val TAG = "YunX-DL"
+
+/** 分轨流式下载断流后的最大重试次数（每次带 Range 从已写位置续传） */
+private const val MAX_STREAM_RETRIES = 3
 
 /** 单文件 Range 分片的安全并发上限。迅雷等 CDN 对单文件并发 Range 有阈值，
  *  超过约 8 个并发会把多余请求降级为 200 整文件（忽略 Range），
@@ -160,6 +167,16 @@ private class InflightChunk(val start: Long, val size: Long, val worker: Int) {
 
     /** 本次快照算出的瞬时速度（只由看门狗协程读写） */
     var lastBps = 0L
+
+    /**
+     * 最近一次「收到字节」的时刻（只由看门狗协程读写）。
+     * ★ 它是判断连接是否真的卡住的**直接**证据（见 [idleMs]）：瞬时速度低只说明慢，
+     *   而「多久一个字节都没收到」才是连接被 CDN 挂住的判据（2026-10-23 用户实测需要）。
+     */
+    var lastProgressAtMs = startedAtMs
+
+    /** 距上次收到字节过去了多久（毫秒）—— 0 附近表示在正常推进 */
+    val idleMs: Long get() = System.currentTimeMillis() - lastProgressAtMs
 
     /** ★ 慢连接抢占标志：置位后 ChunkDownloader 断开当前连接、换新连接从已收字节续传（不丢数据） */
     val preempt = AtomicBoolean(false)
@@ -314,7 +331,10 @@ class DownloadManager(
         val now = System.currentTimeMillis()
         for (d in diag.values) {
             val bytes = d.bytes.get()
-            d.lastBps = (bytes - d.lastBytes).coerceAtLeast(0L) * 1000 / (now - d.lastAtMs).coerceAtLeast(1L)
+            val delta = bytes - d.lastBytes
+            d.lastBps = delta.coerceAtLeast(0L) * 1000 / (now - d.lastAtMs).coerceAtLeast(1L)
+            // 本周期有增长才刷新「最近收到字节」时刻：idleMs 由此得出，日志/调试页据此说「多少秒没有数据」
+            if (delta > 0) d.lastProgressAtMs = now
             d.lastBytes = bytes
             d.lastAtMs = now
         }
@@ -359,13 +379,19 @@ class DownloadManager(
             d.preemptCount++
             d.lastPreemptAtMs = now
             d.preempt.set(true)
+            // ★ 必须主动掐断在飞连接：只置标志位时，连接被 CDN 挂住（read 阻塞）就永远轮不到检查标志，
+            //   日志里就会看到「标了卡死 / 记了抢占，但那条连接一直不换」（2026-10-23 实测）
+            downloader.cancelChunkCall(id, d.start.toString())
             taken++
             Log.w(TAG, "runTask: id=$id 抢占慢连接 分片=$chunkKey(worker#${d.worker}) 起点=${d.start} 块=${diagSize(d.size)} 已收=${diagSize(d.bytes.get())} " +
                 "瞬时=${diagSpeed(d.lastBps)} 阈值=${diagSpeed(floor)} 第${d.preemptCount}/$PREEMPT_MAX 次（换连接续传）")
             DownloadDebugLog.record(
-                id, "抢占慢连接",
+                id, "自动重连",
                 "分片=$chunkKey worker#${d.worker} 起点=${d.start} 块=${diagSize(d.size)} 已收=${diagSize(d.bytes.get())} " +
-                    "瞬时=${diagSpeed(d.lastBps)} 阈值=${diagSpeed(floor)} 第${d.preemptCount}/$PREEMPT_MAX 次"
+                    "瞬时=${diagSpeed(d.lastBps)} 阈值=${diagSpeed(floor)} 已跑=${d.elapsedMs / 1000}s " +
+                    "无数据=${d.idleMs / 1000}s " +
+                    "第${d.preemptCount}/$PREEMPT_MAX 次 → 已掐断当前连接、换新连接从已收字节续传" +
+                    (if (d.preemptCount >= PREEMPT_MAX) "（已达自动重连上限，之后不再重连，直到该片重新排队）" else "")
             )
         }
     }
@@ -497,6 +523,7 @@ class DownloadManager(
                 received = d.bytes.get(),
                 bps = d.lastBps,
                 elapsedMs = d.elapsedMs,
+                idleMs = d.idleMs,
                 preemptCount = d.preemptCount,
                 preempting = d.preempt.get()
             )
@@ -506,8 +533,16 @@ class DownloadManager(
     /** 下载调试：手动把某一路标记为「慢连接、换连接续传」（调试页的「强制重连」） */
     fun forcePreemptChunk(taskId: Long, key: String): Boolean {
         val d = activeChunkMaps[taskId]?.get(key) ?: return false
-        DownloadDebugLog.record(taskId, "手动抢占", "调试页强制重连 key=$key")
+        DownloadDebugLog.record(
+            taskId, "手动重连",
+            "key=$key 起点=${d.start} 已收=${diagSize(d.bytes.get())}/${diagSize(d.size)} " +
+                "瞬时=${diagSpeed(d.lastBps)} 已跑=${d.elapsedMs / 1000}s 无数据=${d.idleMs / 1000}s " +
+                "已抢占${d.preemptCount}/$PREEMPT_MAX 次 → 已掐断当前连接、换新连接从已收字节续传"
+        )
         d.preempt.set(true)
+        // ★ 必须真的掐断在飞连接：只置标志位时，连接被 CDN 挂住（read 阻塞）就永远轮不到检查标志，
+        //   界面表现就是「点了重连没反应」（2026-10-23 实测）
+        downloader.cancelChunkCall(taskId, d.start.toString())
         return true
     }
 
@@ -575,6 +610,13 @@ class DownloadManager(
         mergeAudioUrl: String = "",
         /** 音轨的请求头（与 [headers] 一样加密落库；各平台校验 Referer/Cookie） */
         mergeAudioHeaders: Map<String, String> = emptyMap(),
+        /**
+         * 动图（Live Photo）的**动图资源直链**（微博 `.mov` / 抖音 mp4）。
+         * 非空 = 先下 [url] 的静图与该资源，再合成为一张「动态照片」（Motion Photo 单文件，
+         * 见 `MotionPhotoWriter`），产物仍是 `.jpg`；空 = 普通单文件下载。
+         * 带动图的任务同样**强制走内置下载器**（引擎不支持合成）。
+         */
+        motionUrl: String = "",
         /** 下载成功完成后的清理回调（如删除网盘临时转存文件）；失败/取消不触发。
          * 注意：必须是最后一个参数（调用点有大量尾随 lambda 用法，放它之后会编译失败）。 */
         onComplete: suspend () -> Unit = {}
@@ -600,6 +642,7 @@ class DownloadManager(
                     altSourcesJson = encodeAltSources(altSources),
                     mergeAudioUrl = mergeAudioUrl,
                     mergeAudioHeadersJson = if (mergeAudioUrl.isNotBlank()) encodeHeaders(mergeAudioHeaders) else "",
+                    motionUrl = motionUrl,
                     platform = taskPlatform, sourceFileId = sourceFileId, sourceType = sourceType,
                     sourceContext = sourceContext, urlExpiresAt = urlExpiresAt,
                     etag = etag, lastModified = lastModified
@@ -649,7 +692,7 @@ class DownloadManager(
             )
             return id
         }
-        if (shouldUseEngine(taskPlatform, needMerge = mergeAudioUrl.isNotBlank())) {
+        if (shouldUseEngine(taskPlatform, needMerge = mergeAudioUrl.isNotBlank() || motionUrl.isNotBlank())) {
             // 任务登记、下载页展示、完成清理回调都与内置下载器完全一致，只有「执行」交给 Gopeed 引擎
             launchEngineTask(id) { startViaEngine(id, url, safeName, headers, taskPlatform) }
         } else {
@@ -678,7 +721,7 @@ class DownloadManager(
 
     /**
      * 是否把任务交给 Gopeed 引擎：设置里选了引擎 + 引擎已导入；GitHub 走镜像回退（引擎不支持），
-     * **DASH 合轨任务**（引擎没有合轨能力）也始终用内置下载器。
+     * **需要本地后处理的任务**（DASH 合轨、动图合成 —— 引擎都没有这些能力）也始终用内置下载器。
      */
     private fun shouldUseEngine(platform: String, needMerge: Boolean = false): Boolean =
         !needMerge &&
@@ -1655,6 +1698,13 @@ class DownloadManager(
             return
         }
 
+        // 动图（Live Photo）：静图 + 动图资源各自下载 → 合成「动态照片」，同样不走 Range 分片
+        if (task.motionUrl.isNotBlank()) {
+            Log.d(TAG, "runTask: id=$id 动图合成 动图=${LogRedactor.url(task.motionUrl)}")
+            motionPhotoDownload(id, task, headers)
+            return
+        }
+
         // HLS（m3u8 转码流，如 UC play）：不走 Range 分片，直接拉分片合并
         if (task.url.contains(".m3u8", true) || task.url.contains(".m3u", true)) {
             Log.d(TAG, "runTask: id=$id HLS 转码流下载 origin=${LogRedactor.url(task.url)}")
@@ -1691,7 +1741,8 @@ class DownloadManager(
             DiagnosticLog.DOWNLOAD, "task_size_probed", taskId = id, status = "downloading", size = total,
             summary = "已有进度=${task.downloadedSize} url=${LogRedactor.url(task.url)}"
         )
-        dao.updateProgress(id, DownloadTaskEntity.STATUS_DOWNLOADING, task.downloadedSize, total)
+        // ★ 钳制后再回写：库里可能残留旧版本写下的虚高进度（> total），别把它原样再写一遍
+        dao.updateProgress(id, DownloadTaskEntity.STATUS_DOWNLOADING, minOf(task.downloadedSize, total), total)
         // 取到大小后再次检查取消（暂停可能发生在 getTotalSize 期间）
         if (!isTaskActive()) return
 
@@ -1799,7 +1850,9 @@ class DownloadManager(
                     val result = downloader.downloadChunk(id, src.url, part.start, part.end, part.file, src.headers,
                         preempt = diag.preempt, expectedTotal = total, expectedEtag = expectedEtag,
                         onCongestion = { wait -> connections.congested(wait) },
-                        contentDigest = digest) { bytes ->
+                        contentDigest = digest,
+                        // ★ chunkKey = 该片起点：让「重连」/抢占能据此主动掐断这条连接
+                        chunkKey = diag.start.toString()) { bytes ->
                         speedLimiter.awaitAllow(bytes)
                         diag.bytes.addAndGet(bytes)
                         newBytes.addAndGet(bytes)
@@ -2076,11 +2129,14 @@ class DownloadManager(
         val mergedFile = File(workDir, "merged.mp4")
         val progress = AtomicLong(0L)
         val lastAt = AtomicLong(0L)
+        // ★ 两轨 Content-Length 累加作为任务总大小（此前恒 0，进度条/速度都不显示）
+        val totalBytes = AtomicLong(0L)
+        val streamRecorder = SpeedRecorder()
         try {
             // 重启恢复时内存里没有音轨头，回查数据库（与主请求头同样的加密存储）
             val audioHeaders = taskMergeAudioHeaders[id] ?: loadPersistedMergeAudioHeaders(id)
-            streamUrlToFile(task.url, headers, videoFile, id, task.fileName, progress, lastAt)
-            streamUrlToFile(task.mergeAudioUrl, audioHeaders, audioFile, id, task.fileName, progress, lastAt)
+            streamUrlToFile(task.url, headers, videoFile, id, task.fileName, progress, lastAt, totalBytes, streamRecorder)
+            streamUrlToFile(task.mergeAudioUrl, audioHeaders, audioFile, id, task.fileName, progress, lastAt, totalBytes, streamRecorder)
             if (!DashMuxer.mux(videoFile, audioFile, mergedFile)) {
                 throw IllegalStateException("分轨合轨失败（音视频轨道不配套或文件不完整），可改用未登录的单文件低清")
             }
@@ -2106,7 +2162,62 @@ class DownloadManager(
     }
 
     /**
-     * 把整段响应流式写入文件，并按写入量上报进度（合轨的两条轨道各调一次）。
+     * 动图（Live Photo）合成下载：静图 + 动图资源各自下载 → 合成一张「动态照片」→ 保存 → 完成回调。
+     *
+     * ★ 产物是**一个 `.jpg`**，内部是 Motion Photo 单文件（静图 + 尾部追加 MP4 + XMP，见
+     *   [MotionPhotoWriter]）：安卓相册（小米/OPPO/vivo 系）会显示成「会动的照片」；
+     *   换到 iPhone 上只是普通图片（苹果的 Live Photo 是另一种「静图 + 配对 MOV」两文件格式）。
+     * ★ 动图资源不是 mp4 时（微博的动图是 `.mov`）先 [DashMuxer.remuxToMp4] 换封装 —— 不重编码。
+     * ★ 与 [dashMergeDownload] 同样的取舍：**单连接流式下载**（两段都不切片），全程只在 cache
+     *   临时目录里操作、成功保存后才清理；任何一步失败都抛错，由上层落成带原因的失败任务，
+     *   绝不把半个文件当成品留在下载目录。
+     */
+    private suspend fun motionPhotoDownload(id: Long, task: DownloadTaskEntity, headers: Map<String, String>) {
+        if (!isTaskActive()) return
+        _stats.update { it + (id to DownloadStats(0L, -1L, 1)) }
+        val workDir = File(context.cacheDir, "motion_$id")
+        workDir.deleteRecursively()
+        if (!workDir.mkdirs()) throw IllegalStateException("无法创建动图临时目录")
+        val stillFile = File(workDir, "still.img")
+        val motionFile = File(workDir, "motion.bin")
+        val remuxedFile = File(workDir, "motion.mp4")
+        val mergedFile = File(workDir, "motion_photo.jpg")
+        val progress = AtomicLong(0L)
+        val lastAt = AtomicLong(0L)
+        // 静图与动图两段的 Content-Length 累加作为任务总大小（与 DASH 合轨同一口径）
+        val totalBytes = AtomicLong(0L)
+        val streamRecorder = SpeedRecorder()
+        try {
+            streamUrlToFile(task.url, headers, stillFile, id, task.fileName, progress, lastAt, totalBytes, streamRecorder)
+            streamUrlToFile(task.motionUrl, headers, motionFile, id, task.fileName, progress, lastAt, totalBytes, streamRecorder)
+            // 动图资源在容器里声明为 video/mp4：微博给的是 .mov，先换封装；换封装失败则退回原文件再试
+            val video = if (DashMuxer.remuxToMp4(motionFile, remuxedFile)) remuxedFile else motionFile
+            if (!MotionPhotoWriter.write(stillFile, video, mergedFile)) {
+                throw IllegalStateException("动图合成失败（静图不是 JPEG，或动图轨道不可用）")
+            }
+            // Android 9- 保存前检查存储权限（与其它路径一致）
+            if (!storagePermissionProvider()) {
+                throw IllegalStateException("未授予存储权限，无法保存到下载目录")
+            }
+            val savedPath = withContext(Dispatchers.IO) {
+                DownloadSaver.save(context, task.fileName, mergedFile, saveDirProvider())
+            } ?: throw IllegalStateException("保存到下载目录失败")
+            val total = mergedFile.length()
+            completeWithAvg(id, savedPath, total)
+            Log.d(TAG, "motionPhotoDownload: id=$id 动图合成完成 savedPath=$savedPath size=$total")
+            DownloadService.notifyResult(
+                context, id, task.fileName, success = true, promote = showSpeedProvider()
+            )
+            taskCallbacks.remove(id)?.let { cb -> runCatching { cb() } }
+            _stats.update { it - id }
+        } finally {
+            // 成功、失败、取消一律清临时文件
+            workDir.deleteRecursively()
+        }
+    }
+
+    /**
+     * 把整段响应流式写入文件，并按写入量上报进度（DASH 合轨的两条轨道、动图合成的静图与动图各调一次）。
      *
      * 任务被取消/暂停时直接抛 [CancellationException] 结束下载（临时目录由调用方 finally 清理）。
      */
@@ -2117,30 +2228,76 @@ class DownloadManager(
         id: Long,
         fileName: String,
         progress: AtomicLong,
-        lastAt: AtomicLong
+        lastAt: AtomicLong,
+        totalBytes: AtomicLong,
+        speedRecorder: SpeedRecorder
     ) = withContext(Dispatchers.IO) {
-        val headerBuilder = Headers.Builder()
-        headers.forEach { (name, value) -> if (value.isNotBlank()) headerBuilder.add(name, value) }
-        val request = Request.Builder().url(url).headers(headerBuilder.build()).build()
-        HttpClients.downloadClient().newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw IllegalStateException("分轨下载失败：HTTP ${response.code}（${LogRedactor.url(url)}）")
-            }
-            val body = response.body ?: throw IllegalStateException("分轨响应为空")
-            body.byteStream().use { input ->
-                target.outputStream().use { out ->
-                    val buffer = ByteArray(64 * 1024)
-                    while (true) {
-                        if (!isTaskActive()) throw CancellationException("任务已取消")
-                        val read = input.read(buffer)
-                        if (read <= 0) break
-                        speedLimiter.awaitAllow(read.toLong())
-                        out.write(buffer, 0, read)
-                        val total = progress.addAndGet(read.toLong())
-                        persistProgressIfDue(id, total, 0, force = false, lastAt = lastAt)
-                        notifyProgress(id, fileName, total, 0)
+        var attempt = 0
+        while (true) {
+            // 已写字节作为断点：从头下载不带 Range；续传才带，服务器应回 206
+            val offset = target.length()
+            val headerBuilder = Headers.Builder()
+            headers.forEach { (name, value) -> if (value.isNotBlank()) headerBuilder.add(name, value) }
+            if (offset > 0) headerBuilder.add("Range", "bytes=$offset-")
+            val request = Request.Builder().url(url).headers(headerBuilder.build()).build()
+            try {
+                HttpClients.downloadClient().newCall(request).execute().use { response ->
+                    // 续传时服务器若忽略 Range 返回 200 全量，append 会重复写入 → 视为不支持续传，抛错兜底
+                    if (offset > 0 && response.code != 206) {
+                        throw IllegalStateException(
+                            "分轨续传失败：服务器未按 Range 响应（HTTP ${response.code}，${LogRedactor.url(url)}）"
+                        )
                     }
+                    if (!response.isSuccessful) {
+                        throw IllegalStateException("分轨下载失败：HTTP ${response.code}（${LogRedactor.url(url)}）")
+                    }
+                    val body = response.body ?: throw IllegalStateException("分轨响应为空")
+                    // 只有从头下载（offset==0）才把本轨完整长度累加进总大小；续传的 Content-Length 只是剩余部分
+                    val declared = body.contentLength()
+                    if (offset == 0L && declared > 0) totalBytes.addAndGet(declared)
+                    DiagnosticLog.log(
+                        DiagnosticLog.DOWNLOAD, "stream_start", taskId = id, status = "downloading",
+                        summary = "code=${response.code} 断点=${diagSize(offset)} " +
+                            "本轨长度=${if (declared > 0) diagSize(declared) else "未知"} " +
+                            "累计=${diagSize(totalBytes.get())} url=${LogRedactor.url(url)}"
+                    )
+                    body.byteStream().use { input ->
+                        // append = 断点续传时从文件末尾接着写（offset>0）；从头下载正常覆盖
+                        FileOutputStream(target, offset > 0).use { out ->
+                            val buffer = ByteArray(64 * 1024)
+                            while (true) {
+                                if (!isTaskActive()) throw CancellationException("任务已取消")
+                                val read = input.read(buffer)
+                                if (read <= 0) break
+                                speedLimiter.awaitAllow(read.toLong())
+                                out.write(buffer, 0, read)
+                                val new = progress.addAndGet(read.toLong())
+                                val total = totalBytes.get()
+                                // 速度采样进 _stats：UI 与通知栏都能显示实时速度（此前恒 0，看着像卡死）
+                                speedRecorder.onBytes(new)?.let { speed ->
+                                    val remain = if (speed > 0 && total > 0) (total - new) * 1000 / speed else -1L
+                                    _stats.update { it + (id to DownloadStats(speed, remain, 1)) }
+                                }
+                                persistProgressIfDue(id, new, total, force = false, lastAt = lastAt)
+                                notifyProgress(id, fileName, new, total)
+                            }
+                        }
+                    }
+                    DiagnosticLog.log(
+                        DiagnosticLog.DOWNLOAD, "stream_finish", taskId = id, status = "downloading",
+                        summary = "本轨完成=${diagSize(target.length())} 累计=${diagSize(progress.get())} url=${LogRedactor.url(url)}"
+                    )
                 }
+                return@withContext
+            } catch (e: IOException) {
+                attempt++
+                if (attempt >= MAX_STREAM_RETRIES || !isTaskActive()) throw e
+                DiagnosticLog.warn(
+                    DiagnosticLog.DOWNLOAD, "stream_retry",
+                    "task=$id | 断流续传 $attempt/$MAX_STREAM_RETRIES：${e.message} 已写=${diagSize(target.length())}"
+                )
+                DownloadDebugLog.record(id, "断流续传", "第 $attempt/$MAX_STREAM_RETRIES 次：${e.message}")
+                delay(1200L * attempt)
             }
         }
     }

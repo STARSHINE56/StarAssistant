@@ -135,8 +135,11 @@ fun VideoResultSection(
         selectionMode = false
         selectedUrls = emptySet()
     }
-    // 多选时系统返回键先退出多选，而不是直接离开解析结果页
-    BackHandler(enabled = selectionMode) { exitSelection() }
+    // 系统返回键：多选时先退出多选，否则离开解析结果页回到输入页（输入框内容保留，与网盘详情页一致）
+    // ★ 必须一直 enabled：此前只拦多选态，非多选时按返回键没人接 → Activity 被结束、直接退回桌面
+    BackHandler {
+        if (selectionMode) exitSelection() else onBack()
+    }
 
     Surface(
         modifier = modifier.fillMaxSize(),
@@ -722,17 +725,22 @@ private fun openMediaPreview(
 }
 
 /** VideoMedia → PreviewMedia：类型映射 + 请求头 / HLS 透传（标题缺失时回退作品标题） */
-private fun VideoMedia.toPreviewMedia(workTitle: String): PreviewMedia = PreviewMedia(
-    url = url,
-    kind = when (kind) {
-        VideoMediaKind.VIDEO -> PreviewKind.VIDEO
-        VideoMediaKind.IMAGE -> PreviewKind.IMAGE
-        VideoMediaKind.AUDIO -> PreviewKind.AUDIO
-    },
-    title = fileName.ifBlank { workTitle },
-    headers = headers,
-    isHls = isHls,
-    // B站 DASH 分轨：把合并音轨一起交给预览页，由它提示「预览只有画面，下载后才会合轨」
-    audioUrl = audioUrl,
-    audioHeaders = audioHeaders
-)
+private fun VideoMedia.toPreviewMedia(workTitle: String): PreviewMedia {
+    // 动图（Live Photo）：预览直接播「会动的那一半」（动图资源），比只显示一张静图更贴合用户预期
+    val playMotion = motionUrl.isNotBlank()
+    return PreviewMedia(
+        url = if (playMotion) motionUrl else url,
+        kind = when {
+            playMotion -> PreviewKind.VIDEO
+            kind == VideoMediaKind.VIDEO -> PreviewKind.VIDEO
+            kind == VideoMediaKind.IMAGE -> PreviewKind.IMAGE
+            else -> PreviewKind.AUDIO
+        },
+        title = fileName.ifBlank { workTitle },
+        headers = headers,
+        isHls = isHls,
+        // B站 DASH 分轨：把合并音轨一起交给预览页，由它用 MergingMediaSource 流式合并（预览也有声音）
+        audioUrl = audioUrl,
+        audioHeaders = audioHeaders
+    )
+}
