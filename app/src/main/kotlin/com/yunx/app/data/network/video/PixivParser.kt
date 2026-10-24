@@ -49,6 +49,9 @@ object PixivParser : VideoParser {
 
     private const val REFERER = "https://www.pixiv.net/"
 
+    /** 匹配 ISO 时区尾巴 `+09:00` / `-05:00`，捕获时不带冒号（Z 模式只认 `+0900`） */
+    private val TZ_COLON = Regex("([+-]\\d{2}):(\\d{2})$")
+
     private fun apiHeaders(cookie: String): Map<String, String> = buildMap {
         put("User-Agent", VideoHttp.UA_CHROME)
         put("Referer", REFERER)
@@ -203,8 +206,11 @@ object PixivParser : VideoParser {
     }
 
     /** `2024-01-01T12:00:00+09:00` 这种带时区的 ISO 时间 → 秒级时间戳 */
+    // ★ 模式字符 X 需要 API 24，而星辰 minSdk 是 23：先把 `+09:00` 归一成 `+0900`，
+    //   再用 Z（RFC 822 时区）解析，语义等价且在 23 上可用。
     private fun parseCreateDate(text: String): Long = runCatching {
-        SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US).parse(text)?.time?.div(1000) ?: 0L
+        val normalized = text.replace(TZ_COLON, "$1$2")
+        SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssZ", Locale.US).parse(normalized)?.time?.div(1000) ?: 0L
     }.getOrDefault(0L)
 
     /** 从原图地址里取扩展名（Pixiv 有 jpg / png / gif，不能一律当 jpg） */
