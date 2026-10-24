@@ -32,14 +32,18 @@ import androidx.compose.material.icons.outlined.Article
 import androidx.compose.material.icons.outlined.Backup
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.BugReport
+import androidx.compose.material.icons.outlined.Fingerprint
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Layers
+import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.Power
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Restore
 import androidx.compose.material.icons.outlined.Speed
+import androidx.compose.material.icons.outlined.SwitchAccount
 import androidx.compose.material.icons.outlined.SystemUpdate
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.Wifi
@@ -52,6 +56,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import com.yunx.app.ui.theme.ThemeController
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
@@ -80,6 +85,7 @@ import androidx.core.content.ContextCompat
 import com.xingchen.assistant.R
 import com.yunx.app.data.backup.AuthBackupManager
 import com.yunx.app.data.backup.AuthCrypto
+import com.yunx.app.data.download.DownloadDebugLog
 import com.yunx.app.data.download.DownloadPlatform
 import com.yunx.app.data.download.DownloadSaver
 import com.yunx.app.data.prefs.SettingsRepository
@@ -114,6 +120,12 @@ fun SettingsScreen(
     onSupportClick: () -> Unit,
     backupManager: AuthBackupManager,
     onGopeedClick: () -> Unit = {},
+
+    /** 打开「链接唤起」页（深链接注册项的逐个开关） */
+    onLinkOpenClick: () -> Unit = {},
+
+    /** 打开「多账号下载」页（两个实验性开关：多账号轮流取链 / 单文件多源分片） */
+    onMultiAccountDownloadClick: () -> Unit = {},
     onConcurrencyChanged: () -> Unit = {},
     onCheckUpdate: () -> Unit = {},
     // 保留此参数以兼容 MainScreen 中现有的调用。
@@ -194,6 +206,12 @@ fun SettingsScreen(
         SettingsRepository(context)
     }
 
+    // 下载调试开关：开启后下载页长按任务可看「调试信息」；关闭会清空日志，故需二次确认
+    var downloadDebugOn by remember { mutableStateOf(settingsRepo.downloadDebug) }
+    var showDisableDownloadDebugConfirm by remember { mutableStateOf(false) }
+    // 全量 SHA-256 校验开关：默认关，开启后保存文件时顺带算整文件摘要写进调试日志
+    var fullShaOn by remember { mutableStateOf(settingsRepo.fullFileSha256) }
+
     var downloadDirUri by remember {
         mutableStateOf(settingsRepo.downloadDirUri)
     }
@@ -256,8 +274,7 @@ fun SettingsScreen(
             SnackbarController.show("下载保存目录已更新")
         }
     }
-
-    // 网盘认证文件选择器
+    // 导入认证信息文件选择器：选择后先判断是否加密备份，加密则弹密码框
     val importLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -316,10 +333,90 @@ fun SettingsScreen(
         SectionLabel("下载")
         SyncedFeaturesSettings(onGopeedClick)
 
+        // 多账号下载（实验性）：只做入口，两个开关在独立页面里改（开启前有二次风险确认）
+        SettingsItem(
+            icon = Icons.Outlined.SwitchAccount,
+            title = "多账号下载",
+            description = "实验性：同一网盘多个账号轮流取链 / 单文件多源提速",
+            onClick = onMultiAccountDownloadClick
+        )
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        // 链接唤起：点网盘/视频分享链接直接进来解析，可按平台逐个开关
+        SettingsItem(
+            icon = Icons.Outlined.Link,
+            title = "网盘链接一键唤起",
+            description = "点分享链接（或分享给星辰助手）直接进来解析；可按平台逐个开关",
+            onClick = onLinkOpenClick
+        )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        SectionLabel("调试")
+
+        // 下载调试：开启后按下载任务记录事件流，下载页长按任务可进「调试信息」页
+        SettingsItem(
+            icon = Icons.Outlined.BugReport,
+            title = "下载调试",
+            description = if (downloadDebugOn) {
+                "已在记录：下载页长按任务 → 调试信息（关闭会清空日志）"
+            } else {
+                "关闭：不记录下载调试日志"
+            },
+            onClick = {
+                if (!downloadDebugOn) {
+                    downloadDebugOn = true
+                    ThemeController.setDownloadDebug(context, true)
+                    DownloadDebugLog.setEnabled(true)
+                    SnackbarController.show("下载调试已开启")
+                } else {
+                    // 关闭会清空全部调试日志：先二次确认再真正关闭
+                    showDisableDownloadDebugConfirm = true
+                }
+            },
+            trailing = {
+                Switch(
+                    checked = downloadDebugOn,
+                    onCheckedChange = null
+                )
+            }
+        )
+
+        // 全量 SHA-256 只在「下载调试」开启时才有意义（摘要只写进调试日志），调试关着时整行隐藏
+        if (downloadDebugOn) {
+            Spacer(modifier = Modifier.height(6.dp))
+
+            SettingsItem(
+                icon = Icons.Outlined.Fingerprint,
+                title = "全量 SHA-256",
+                description = if (fullShaOn) {
+                    "已开启：保存后记录整文件 SHA-256（写入调试日志）"
+                } else {
+                    "关闭：不算整文件摘要（默认，省 CPU）"
+                },
+                onClick = {
+                    fullShaOn = !fullShaOn
+                    settingsRepo.fullFileSha256 = fullShaOn
+                    SnackbarController.show(
+                        if (fullShaOn) "已开启全量 SHA-256 校验" else "已关闭全量 SHA-256 校验"
+                    )
+                },
+                trailing = {
+                    Switch(
+                        checked = fullShaOn,
+                        onCheckedChange = null
+                    )
+                }
+            )
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
         SettingsItem(
             icon = Icons.Outlined.Tune,
             title = "下载线程数",
-            description = "按网盘分别设置分片并发数（默认 32，最高 512）",
+            description = "按网盘设置并发上限；内置引擎自动调速，资源安全上限 128",
             onClick = {
                 showThreadsDialog = true
             }
@@ -533,32 +630,31 @@ fun SettingsScreen(
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        SectionLabel("网盘认证")
-
+        SectionLabel("认证备份")
         SettingsItem(
             icon = Icons.Outlined.Backup,
-            title = "导出网盘认证",
-            description = "使用至少 8 位口令加密 Cookie/JWT 后导出",
-            onClick = {
-                showExportAuthDialog = true
-            }
+            title = "导出认证信息",
+            description = "使用至少 8 位口令加密网盘与视频平台的 Cookie/JWT 后导出",
+            onClick = { showExportAuthDialog = true }
         )
 
         Spacer(modifier = Modifier.height(6.dp))
 
         SettingsItem(
             icon = Icons.Outlined.Restore,
-            title = "导入网盘认证",
-            description = "选择加密或明文的认证备份文件，恢复网盘登录",
-            onClick = {
-                importLauncher.launch(
-                    arrayOf(
-                        "application/json",
-                        "application/octet-stream",
-                        "*/*"
-                    )
-                )
-            }
+            title = "导入认证信息",
+            description = "选择加密或明文的认证备份文件，恢复网盘与视频平台登录",
+            onClick = { importLauncher.launch(arrayOf("application/json", "application/octet-stream", "*/*")) }
+        )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        SectionLabel("链接唤起")
+        SettingsItem(
+            icon = Icons.Outlined.Link,
+            title = "网盘链接一键唤起",
+            description = "点分享链接（或分享到星辰助手）直接进来解析；可按平台逐个开关",
+            onClick = onLinkOpenClick
         )
 
         Spacer(modifier = Modifier.height(24.dp))
@@ -697,6 +793,35 @@ fun SettingsScreen(
                 ) {
                     Text("取消")
                 }
+            }
+        )
+    }
+
+    // 关闭「下载调试」的二次确认：关闭会清空已记录的全部调试日志，且不可恢复
+    if (showDisableDownloadDebugConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDisableDownloadDebugConfirm = false },
+            title = { Text("关闭下载调试？") },
+            text = {
+                Text(
+                    "关闭后会清空已记录的全部下载调试日志，且无法恢复；" +
+                        "「全量 SHA-256」也会被一并关闭（下次开启下载调试后需手动重新开启）。确定要关闭吗？"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showDisableDownloadDebugConfirm = false
+                    downloadDebugOn = false
+                    ThemeController.setDownloadDebug(context, false)
+                    // 关闭即清空：DownloadDebugLog.setEnabled(false) 内部会 clear()
+                    DownloadDebugLog.setEnabled(false)
+                    fullShaOn = false
+                    settingsRepo.fullFileSha256 = false
+                    SnackbarController.show("下载调试已关闭，日志已清空；全量 SHA-256 已一并关闭")
+                }) { Text("关闭并清空") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDisableDownloadDebugConfirm = false }) { Text("取消") }
             }
         )
     }
@@ -846,7 +971,7 @@ fun SettingsScreen(
         )
     }
 
-    // 导出网盘认证
+    // 导出认证信息弹窗（AES 加密密码 + 导出范围）
     if (showExportAuthDialog) {
         ExportAuthDialog(
             onDismiss = {
@@ -1273,7 +1398,7 @@ fun SettingsScreen(
     }
 }
 
-/** 导出网盘认证弹窗 */
+/** 导出认证弹窗：AES 加密密码 + 导出范围（仅已登录 / 全部绑定） */
 @Composable
 private fun ExportAuthDialog(
     onDismiss: () -> Unit,
@@ -1288,9 +1413,7 @@ private fun ExportAuthDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = {
-            Text("导出网盘认证")
-        },
+        title = { Text("导出认证信息") },
         text = {
             Column(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -1342,6 +1465,8 @@ private fun ExportAuthDialog(
                         text = "仅导出当前已登录的网盘",
                         style = MaterialTheme.typography.bodyMedium
                     )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("仅导出当前已登录的账号", style = MaterialTheme.typography.bodyMedium)
                 }
 
                 Row(
@@ -1363,6 +1488,8 @@ private fun ExportAuthDialog(
                         text = "导出全部绑定的网盘",
                         style = MaterialTheme.typography.bodyMedium
                     )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("导出全部绑定的账号", style = MaterialTheme.typography.bodyMedium)
                 }
             }
         },
@@ -1396,9 +1523,7 @@ private fun ImportAuthDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = {
-            Text("导入网盘认证")
-        },
+        title = { Text("导入认证信息") },
         text = {
             Column(
                 verticalArrangement = Arrangement.spacedBy(12.dp)

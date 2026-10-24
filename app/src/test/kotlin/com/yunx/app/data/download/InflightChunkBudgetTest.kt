@@ -22,18 +22,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * 「全进程在飞分片上限」的内存预算策略。
- *
- * OOM 根因（log/oom）：旧实现给每个任务一个容量恰等于 worker 数的信号量（等于不限流），
- * 线程数上限 512 × 同时下载数 可把在飞分片堆到数千，每路各持一份读缓冲 + 一条
- * OkHttp/Conscrypt 连接 ⇒ 256MB 堆被撑满。这里的边界必须守住：
- * 小堆保底 8 路（不能让低端机退化成单流），大堆夹到 512 路。
- *
- * 预算取最大堆的 1/8，而不是更早的 1/16：下载客户端已固定 HTTP/1.1，每路在飞只占一份 64KB
- * 读缓冲（HTTP/2 时代那条 16MB 的每流窗口不存在了，见 Agent.md §5.1.1）。
- * 256MB 堆按预算算得 512，正好等于上限 ⇒ 设置里的 512 档位 1:1 生效，占 32MB（堆的 1/8）。
- */
+/** Shared Java buffer budget and conservative native thread/TLS ceiling. */
 class InflightChunkBudgetTest {
 
     @Test
@@ -46,8 +35,9 @@ class InflightChunkBudgetTest {
         assertTrue(DownloadManager.inflightChunksFor(256L * MB) <= 512)
         assertTrue(DownloadManager.inflightChunksFor(512L * MB) <= 512)
         assertTrue(DownloadManager.inflightChunksFor(1024L * MB) <= 512)
-        // 本机那种 256MB 堆（无 largeHeap）：选 512 就是 512 路，不再被夹到 256
-        assertEquals(512, DownloadManager.inflightChunksFor(256L * MB))
+        // Include a separate native thread/TLS ceiling rather than counting only read buffers.
+        assertEquals(128, DownloadManager.inflightChunksFor(256L * MB))
+        assertEquals(128, DownloadManager.inflightChunksFor(1024L * MB))
     }
 
     @Test

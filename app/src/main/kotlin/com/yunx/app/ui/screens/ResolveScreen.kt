@@ -21,6 +21,7 @@ package com.yunx.app.ui.screens
 import android.content.ClipboardManager
 import android.content.Context
 import android.os.Build
+import androidx.annotation.DrawableRes
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
@@ -31,6 +32,7 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -87,7 +89,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -96,11 +100,14 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.yunx.app.data.network.ShareLinkParser
 import com.yunx.app.data.network.SharePlatform
+import com.yunx.app.data.network.video.VideoLinkParser
 import com.yunx.app.data.prefs.ResolveHistoryItem
 import com.yunx.app.data.prefs.ResolveHistoryRepository
 import com.yunx.app.ui.SnackbarController
 import com.yunx.app.ui.resolve.DownloadLinkDialog
+import com.yunx.app.ui.items.logoRes
 import com.yunx.app.ui.resolve.ShareDetailScreen
+import com.yunx.app.ui.screens.VideoResultSection
 import com.yunx.app.ui.viewmodel.BaiduCloudViewModel
 import com.yunx.app.ui.viewmodel.C139CloudViewModel
 import com.yunx.app.ui.viewmodel.Pan123CloudViewModel
@@ -146,6 +153,13 @@ fun ResolveScreen(
 
     bookmarkViewModel: BookmarkViewModel,
     onOpenBookmarks: () -> Unit,
+
+    /** 深链接 / 外部分享进来的待解析文本（分享链接、中文口令、带链接的文案都行）；null = 没有 */
+    incomingLink: String? = null,
+
+    /** [incomingLink] 被接手后回调（宿主清空，避免重组时重复解析） */
+    onIncomingLinkConsumed: () -> Unit = {},
+
     modifier: Modifier = Modifier
 ) {
     val homeBookmarks by bookmarkViewModel.homeBookmarks.collectAsState()
@@ -190,9 +204,8 @@ fun ResolveScreen(
                 )
         }
 
-        val github = GitHubLinkParser.parse(rawLink)
-        if (github != null) viewModel.startGitHubResolve(github)
-        else viewModel.startResolve(rawLink, password)
+        // 统一入口：先试视频、再试 GitHub / 网盘（分流在 ViewModel 内完成）
+        viewModel.startVideoResolve(rawLink, password ?: parsed?.pwd)
     }
 
     // -----------------------------
@@ -223,6 +236,35 @@ fun ResolveScreen(
         mutableStateOf(false)
     }
 
+    // 深链接 / 外部分享进来：走统一解析入口（先试视频、再试 GitHub / 网盘），
+    // 但**直接发起解析**——用户是明确点了链接/分享了链接，不该再让他手动点一次「解析」。
+    LaunchedEffect(incomingLink) {
+        val text =
+            incomingLink
+                ?.trim()
+                .orEmpty()
+
+        if (text.isEmpty()) return@LaunchedEffect
+
+        val shareParsed =
+            ShareLinkParser.parse(
+                text
+            )
+
+        link = text
+
+        pwd =
+            shareParsed
+                ?.pwd
+                .orEmpty()
+
+        pwdEdited = true
+
+        viewModel.startVideoResolve(text, shareParsed?.pwd)
+
+        onIncomingLinkConsumed()
+    }
+
     // -----------------------------
     // 剪贴板自动检测
     // -----------------------------
@@ -246,7 +288,9 @@ fun ResolveScreen(
             text.isNotBlank() &&
             text != link &&
             text != ignoredClipboard &&
-            (ShareLinkParser.parse(text) != null || GitHubLinkParser.parse(text) != null || com.yunx.app.data.network.XunleiKouling.looksLikeKouling(text))
+            (ShareLinkParser.parse(text) != null || GitHubLinkParser.parse(text) != null ||
+                com.yunx.app.data.network.XunleiKouling.looksLikeKouling(text) ||
+                VideoLinkParser.looksLikeVideoLink(text))
         ) {
             clipboardSuggestion = text
         }
@@ -438,6 +482,34 @@ fun ResolveScreen(
 
                 is ResolveUiState.Loading -> {
                     LoadingContent()
+                }
+
+                // 视频解析结果：顶部返回与 Detail 一致（回到输入页，输入框内容保留）
+                is ResolveUiState.Video -> {
+                    VideoResultSection(
+                        result =
+                            currentState.result,
+
+                        onDownloadMedia = {
+                            viewModel.downloadVideoMedia(
+                                it
+                            )
+                        },
+
+                        onDownloadAll = {
+                            viewModel.downloadAllVideoMedia()
+                        },
+
+                        onDownloadSelected = {
+                            viewModel.downloadVideoMedias(
+                                it
+                            )
+                        },
+
+                        onBack = {
+                            viewModel.backToInput()
+                        }
+                    )
                 }
 
                 else -> {
@@ -642,14 +714,39 @@ fun ResolveScreen(
                         suggestion
                     )
 
+                val githubParsed =
+                    GitHubLinkParser.parse(
+                        suggestion
+                    )
+
+                // 统一识别：先视频、再 GitHub、最后网盘（与解析入口的分流顺序一致）
+                val videoParsed =
+                    VideoLinkParser.parse(
+                        suggestion
+                    )
+
+                val platformName =
+                    when {
+                        videoParsed != null -> videoParsed.platform.displayName
+                        githubParsed != null -> "GitHub"
+                        parsed != null -> platformLabel(parsed.platform)
+                        else -> "网盘"
+                    }
+
+                val platformLogo =
+                    when {
+                        videoParsed != null -> videoParsed.platform.logoRes()
+                        githubParsed != null -> SharePlatform.GITHUB.logoRes()
+                        parsed != null -> parsed.platform.logoRes()
+                        else -> null
+                    }
+
                 ClipboardSuggestCard(
                     platformName =
-                        parsed
-                            ?.platform
-                            ?.let {
-                                platformLabel(it)
-                            }
-                            ?: "网盘",
+                        platformName,
+
+                    platformLogo =
+                        platformLogo,
 
                     onPaste = {
                         link =
@@ -2326,6 +2423,10 @@ private fun platformLabel(
 @Composable
 private fun ClipboardSuggestCard(
     platformName: String,
+
+    /** 平台 Logo；识别不出平台时为 null，退回原来的链接图标 */
+    @DrawableRes platformLogo: Int?,
+
     onPaste: () -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
@@ -2355,18 +2456,34 @@ private fun ClipboardSuggestCard(
                 verticalAlignment =
                     Alignment.CenterVertically
             ) {
-                Icon(
-                    imageVector =
-                        Icons.Outlined.Link,
+                if (platformLogo != null) {
+                    Image(
+                        painter =
+                            painterResource(platformLogo),
 
-                    contentDescription =
-                        null,
+                        contentDescription =
+                            null,
 
-                    tint =
-                        MaterialTheme
+                        modifier =
+                            Modifier.size(32.dp),
+
+                        contentScale =
+                            ContentScale.Fit
+                    )
+                } else {
+                    Icon(
+                        imageVector =
+                            Icons.Outlined.Link,
+
+                        contentDescription =
+                            null,
+
+                        tint =
+                            MaterialTheme
                             .colorScheme
                             .onPrimaryContainer
-                )
+                    )
+                }
 
                 Spacer(
                     modifier =

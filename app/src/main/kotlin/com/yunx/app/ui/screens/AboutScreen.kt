@@ -1,3 +1,21 @@
+/*
+ * 星辰 (星辰助手) - A network drive share-link parser and high-speed downloader for Android.
+ * Copyright (C) 2026 CYQawa
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 package com.yunx.app.ui.screens
 
 import androidx.compose.foundation.Image
@@ -26,13 +44,11 @@ import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Info
-import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.material.icons.outlined.Shield
-import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -61,7 +77,12 @@ import androidx.compose.ui.unit.sp
 import androidx.activity.compose.BackHandler
 import android.content.Intent
 import android.net.Uri
+import androidx.annotation.DrawableRes
 import com.xingchen.assistant.R
+import com.yunx.app.data.network.SharePlatform
+import com.yunx.app.data.network.video.VideoPlatform
+import com.yunx.app.ui.items.logoRes
+import com.yunx.app.util.AppLinks
 
 /**
  * 关于星辰助手页：应用介绍、支持平台、功能特性、技术栈与免责声明。
@@ -75,19 +96,11 @@ fun AboutScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-
     // 系统返回键 → 返回主页（而不是退出应用）
     BackHandler { onBack() }
-
     val pkgInfo = remember {
-        runCatching {
-            context.packageManager.getPackageInfo(
-                context.packageName,
-                0
-            )
-        }.getOrNull()
+        runCatching { context.packageManager.getPackageInfo(context.packageName, 0) }.getOrNull()
     }
-
     val versionName = pkgInfo?.versionName ?: "1.0"
     val versionCode = pkgInfo?.versionCode ?: 1
 
@@ -95,20 +108,10 @@ fun AboutScreen(
         modifier = modifier.fillMaxSize(),
         topBar = {
             TopAppBar(
-                title = {
-                    Text(
-                        "星辰助手",
-                        style = MaterialTheme.typography.titleLarge
-                    )
-                },
+                title = { Text("关于星辰助手", style = MaterialTheme.typography.titleLarge) },
                 navigationIcon = {
-                    IconButton(
-                        onClick = onBack
-                    ) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "返回"
-                        )
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -121,31 +124,22 @@ fun AboutScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .verticalScroll(
-                    rememberScrollState()
-                )
-                .padding(
-                    horizontal = 20.dp,
-                    vertical = 16.dp
-                ),
-            verticalArrangement =
-                Arrangement.spacedBy(16.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-
             // ---------- App 头部 ----------
-            AppHeader(
-                versionName = versionName,
-                versionCode = versionCode
-            )
+            AppHeader(versionName = versionName, versionCode = versionCode)
 
             // ---------- 简介 ----------
             InfoCard(
                 icon = Icons.Outlined.Cloud,
                 title = "应用简介",
-                description =
-                    "星辰助手是一款网盘分享链接解析与高速下载工具。" +
-                        "粘贴分享链接，登录网盘账号后即可浏览分享内容并直接高速下载文件。"
+                description = "星辰助手是一款网盘 / 视频分享链接解析与高速下载工具。" +
+                    "粘贴链接即可：网盘分享能浏览内容并高速下载，视频链接能解析出直链与原图，" +
+                    "图片 / 视频 / 音频都支持在线预览播放。"
             )
+            
 
             // ---------- 支持平台 ----------
             PlatformCard()
@@ -161,184 +155,104 @@ fun AboutScreen(
 
             // ---------- 开源协议 ----------
             Text(
-                text =
-                    "本项目基于 GNU AGPL-3.0 协议开源",
-                style =
-                    MaterialTheme.typography.labelSmall,
-                color =
-                    MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier =
-                    Modifier.fillMaxWidth(),
-                textAlign =
-                    androidx.compose.ui.text.style.TextAlign.Center
+                text = "本项目基于 GNU AGPL-3.0 协议开源",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
             )
 
             // ---------- 重新预览欢迎界面 ----------
-            PreviewOnboardingCard(
-                onClick = onPreviewOnboarding
-            )
+            PreviewOnboardingCard(onClick = onPreviewOnboarding)
 
             // ---------- 开源仓库 ----------
             GitHubCard(context)
 
-            Spacer(
-                modifier = Modifier.height(8.dp)
-            )
-
+            Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text =
-                    "星辰助手 v$versionName · Made with 星辰 and ChatGPT",
-                style =
-                    MaterialTheme.typography.labelMedium,
-                color =
-                    MaterialTheme.colorScheme.outline,
+                text = "星辰助手 v$versionName · Made with ❤ and deepseek",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.outline,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(
-                        bottom = 12.dp
-                    ),
-                textAlign =
-                    androidx.compose.ui.text.style.TextAlign.Center
+                    .padding(bottom = 12.dp),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
             )
         }
     }
 }
 
-/**
- * App 头部：渐变图标 + 应用名 + 版本 + 标语
- */
+/** App 头部：渐变图标 + 应用名 + 版本 + 标语 */
 @Composable
-private fun AppHeader(
-    versionName: String,
-    versionCode: Int
-) {
+private fun AppHeader(versionName: String, versionCode: Int) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(
-                top = 12.dp,
-                bottom = 4.dp
-            ),
-        horizontalAlignment =
-            Alignment.CenterHorizontally
+            .padding(top = 12.dp, bottom = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Box(
             modifier = Modifier
                 .size(88.dp)
                 .background(
-                    brush =
-                        Brush.linearGradient(
-                            listOf(
-                                MaterialTheme.colorScheme.primary,
-                                MaterialTheme.colorScheme.tertiary
-                            )
-                        ),
-                    shape =
-                        RoundedCornerShape(24.dp)
-                ),
-            contentAlignment =
-                Alignment.Center
-        ) {
-            Image(
-                painter =
-                    painterResource(
-                        R.drawable.icon
-                    ),
-                contentDescription =
-                    "星辰助手图标",
-                modifier = Modifier
-                    .size(88.dp)
-                    .clip(
-                        RoundedCornerShape(
-                            24.dp
+                    brush = Brush.linearGradient(
+                        listOf(
+                            MaterialTheme.colorScheme.primary,
+                            MaterialTheme.colorScheme.tertiary
                         )
                     ),
-                contentScale =
-                    ContentScale.Crop
+                    shape = RoundedCornerShape(24.dp)
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Image(
+                painter = painterResource(R.drawable.icon),
+                contentDescription = "星辰助手图标",
+                modifier = Modifier
+                    .size(88.dp)
+                    .clip(RoundedCornerShape(24.dp)),
+                contentScale = ContentScale.Crop
             )
         }
-
-        Spacer(
-            modifier = Modifier.height(14.dp)
-        )
-
+        Spacer(modifier = Modifier.height(14.dp))
         Text(
             text = "星辰助手",
-            style =
-                MaterialTheme.typography.headlineMedium,
-            fontWeight =
-                FontWeight.SemiBold
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.SemiBold
         )
-
-        Spacer(
-            modifier = Modifier.height(4.dp)
-        )
-
+        Spacer(modifier = Modifier.height(4.dp))
         Text(
-            text =
-                "星辰助手 · v$versionName ($versionCode)",
-            style =
-                MaterialTheme.typography.bodyMedium,
-            color =
-                MaterialTheme.colorScheme.onSurfaceVariant
+            text = "星辰 · v$versionName ($versionCode)",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-
-        Spacer(
-            modifier = Modifier.height(4.dp)
-        )
-
+        Spacer(modifier = Modifier.height(4.dp))
         Text(
-            text =
-                "网盘链接解析与高速下载",
-            style =
-                MaterialTheme.typography.bodySmall,
-            color =
-                MaterialTheme.colorScheme.outline
+            text = "网盘 / 视频链接解析与高速下载",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.outline
         )
     }
 }
 
-/**
- * 通用信息卡片：图标 + 标题 + 描述
- */
+/** 通用信息卡片：图标 + 标题 + 描述 */
 @Composable
-private fun InfoCard(
-    icon: ImageVector,
-    title: String,
-    description: String
-) {
+private fun InfoCard(icon: ImageVector, title: String, description: String) {
     SectionCard {
-        Row(
-            verticalAlignment =
-                Alignment.Top
-        ) {
+        Row(verticalAlignment = Alignment.Top) {
             CardIcon(icon)
-
-            Spacer(
-                modifier =
-                    Modifier.width(14.dp)
-            )
-
+            Spacer(modifier = Modifier.width(14.dp))
             Column {
                 Text(
                     text = title,
-                    style =
-                        MaterialTheme.typography.titleMedium,
-                    fontWeight =
-                        FontWeight.Medium
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Medium
                 )
-
-                Spacer(
-                    modifier =
-                        Modifier.height(6.dp)
-                )
-
+                Spacer(modifier = Modifier.height(6.dp))
                 Text(
                     text = description,
-                    style =
-                        MaterialTheme.typography.bodyMedium,
-                    color =
-                        MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     lineHeight = 22.sp
                 )
             }
@@ -346,268 +260,160 @@ private fun InfoCard(
     }
 }
 
-/**
- * 支持平台卡片
- */
+/** 平台胶囊数据：官方 logo + 名字 */
+private data class PlatformChip(@DrawableRes val logoRes: Int, val name: String)
+
+/** 支持平台卡片：网盘与视频平台各一组，图标用各家官方 logo（见 `PlatformLogos`） */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun PlatformCard() {
-    val platforms = listOf(
-        "夸克网盘" to Icons.Outlined.Cloud,
-        "UC 网盘" to Icons.Outlined.Storage,
-        "迅雷网盘" to Icons.Outlined.Speed,
-        "百度网盘" to Icons.Outlined.Link,
-        "移动云盘" to Icons.Outlined.Cloud,
-        "123 云盘" to Icons.Outlined.Cloud
-    )
+    // GitHub 是「当网盘浏览」的附加项，不算网盘平台，不列进这一组
+    val drives = SharePlatform.entries
+        .filter { it != SharePlatform.GITHUB }
+        .map { PlatformChip(it.logoRes(), it.displayName) }
+    val videos = VideoPlatform.entries.map { PlatformChip(it.logoRes(), it.displayName) }
 
     SectionCard {
-        Row(
-            verticalAlignment =
-                Alignment.CenterVertically
-        ) {
-            CardIcon(
-                Icons.Outlined.Storage
-            )
-
-            Spacer(
-                modifier =
-                    Modifier.width(14.dp)
-            )
-
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            CardIcon(Icons.Outlined.Storage)
+            Spacer(modifier = Modifier.width(14.dp))
             Text(
                 text = "支持平台",
-                style =
-                    MaterialTheme.typography.titleMedium,
-                fontWeight =
-                    FontWeight.Medium
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Medium
             )
         }
+        Spacer(modifier = Modifier.height(12.dp))
+        PlatformChipGroup(label = "网盘", chips = drives)
+        Spacer(modifier = Modifier.height(12.dp))
+        PlatformChipGroup(label = "视频解析", chips = videos)
+    }
+}
 
-        Spacer(
-            modifier =
-                Modifier.height(12.dp)
-        )
-
-        FlowRow(
-            horizontalArrangement =
-                Arrangement.spacedBy(8.dp),
-            verticalArrangement =
-                Arrangement.spacedBy(8.dp)
-        ) {
-            platforms.forEach {
-                    (name, icon) ->
-
-                Surface(
-                    shape =
-                        RoundedCornerShape(50),
-                    color =
-                        MaterialTheme.colorScheme.secondaryContainer
+/** 一组平台胶囊（标题 + 会自动换行的胶囊流） */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun PlatformChipGroup(label: String, chips: List<PlatformChip>) {
+    Text(
+        text = label,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    Spacer(modifier = Modifier.height(8.dp))
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        chips.forEach { chip ->
+            Surface(
+                shape = RoundedCornerShape(50),
+                color = MaterialTheme.colorScheme.secondaryContainer
+            ) {
+                Row(
+                    modifier = Modifier.padding(start = 8.dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        modifier =
-                            Modifier.padding(
-                                horizontal = 12.dp,
-                                vertical = 7.dp
-                            ),
-                        verticalAlignment =
-                            Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = icon,
-                            contentDescription =
-                                null,
-                            modifier =
-                                Modifier.size(
-                                    15.dp
-                                ),
-                            tint =
-                                MaterialTheme.colorScheme.onSecondaryContainer
-                        )
-
-                        Spacer(
-                            modifier =
-                                Modifier.width(
-                                    6.dp
-                                )
-                        )
-
-                        Text(
-                            text = name,
-                            style =
-                                MaterialTheme.typography.labelMedium,
-                            color =
-                                MaterialTheme.colorScheme.onSecondaryContainer
-                        )
-                    }
+                    // 官方图标按自身形状原样画（不裁圆、不垫底色），理由见 PlatformLogos 的 KDoc
+                    Image(
+                        painter = painterResource(chip.logoRes),
+                        contentDescription = null,
+                        modifier = Modifier.size(17.dp),
+                        contentScale = ContentScale.Fit
+                    )
+                    Spacer(modifier = Modifier.width(7.dp))
+                    Text(
+                        text = chip.name,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
                 }
             }
         }
     }
 }
 
-/**
- * 功能特性卡片
- */
+/** 功能特性卡片 */
 @Composable
 private fun FeatureCard() {
     val features = listOf(
-        "一键解析分享链接" to
-            "夸克 / UC / 迅雷 / 百度 / 移动 / 123 分享直链识别",
-
-        "高速分片下载" to
-            "多线程并发 + 断点续传，充分利用带宽",
-
-        "取链即删" to
-            "转存后立即清理，不留残留",
-
-        "凭证本地化" to
-            "Cookie 加密落库，仅存本机"
+        "网盘分享解析" to "夸克 / UC / 迅雷 / 百度 / 139 / 123 / 115 / 光鸭 / 蓝奏云 / 蓝奏云优享版 直链识别",
+        "视频链接解析" to "抖音 / 小红书 / 快手 / 微博 / AcFun 免登录；哔哩哔哩登录后画质更高，Pixiv 未登录只能解析部分公开作品、粘贴浏览器 Cookie 后可解析全部作品",
+        "在线预览与播放" to "图片 / 视频 / 音频在线看（自动带请求头），网盘里的文本文件也能打开",
+        "音视频合轨" to "哔哩哔哩高清是音视频分轨的，应用内部合轨，不需要额外装 ffmpeg",
+        "高速分片下载" to "多线程并发 + 断点续传，充分利用带宽",
+        "取链即删" to "转存后立即清理，不留残留",
+        "凭证本地化" to "Cookie 加密落库，仅存本机"
     )
-
     SectionCard {
-        Row(
-            verticalAlignment =
-                Alignment.CenterVertically
-        ) {
-            CardIcon(
-                Icons.Outlined.CheckCircle
-            )
-
-            Spacer(
-                modifier =
-                    Modifier.width(14.dp)
-            )
-
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            CardIcon(Icons.Outlined.CheckCircle)
+            Spacer(modifier = Modifier.width(14.dp))
             Text(
                 text = "功能特性",
-                style =
-                    MaterialTheme.typography.titleMedium,
-                fontWeight =
-                    FontWeight.Medium
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Medium
             )
         }
-
-        Spacer(
-            modifier =
-                Modifier.height(12.dp)
-        )
-
-        features.forEach {
-                (title, desc) ->
-
-            Row(
-                verticalAlignment =
-                    Alignment.CenterVertically
-            ) {
+        Spacer(modifier = Modifier.height(12.dp))
+        features.forEach { (title, desc) ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     modifier = Modifier
                         .size(6.dp)
-                        .background(
-                            MaterialTheme.colorScheme.primary,
-                            CircleShape
-                        )
+                        .background(MaterialTheme.colorScheme.primary, CircleShape)
                 )
-
-                Spacer(
-                    modifier =
-                        Modifier.width(10.dp)
-                )
-
+                Spacer(modifier = Modifier.width(10.dp))
                 Column {
                     Text(
                         text = title,
-                        style =
-                            MaterialTheme.typography.bodyMedium,
-                        fontWeight =
-                            FontWeight.Medium
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium
                     )
-
                     Text(
                         text = desc,
-                        style =
-                            MaterialTheme.typography.bodySmall,
-                        color =
-                            MaterialTheme.colorScheme.onSurfaceVariant
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
-
-            Spacer(
-                modifier =
-                    Modifier.height(10.dp)
-            )
+            Spacer(modifier = Modifier.height(10.dp))
         }
     }
 }
 
-/**
- * 技术栈卡片
- */
+/** 技术栈卡片 */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun TechCard() {
     val techs = listOf(
-        "Kotlin",
-        "Jetpack Compose",
-        "Material 3",
-        "Room",
-        "OkHttp",
-        "KSP"
+        "Kotlin", "Jetpack Compose", "Material 3", "Room", "OkHttp", "KSP",
+        "Media3 ExoPlayer", "Coil 3", "mp4parser"
     )
-
     SectionCard {
-        Row(
-            verticalAlignment =
-                Alignment.CenterVertically
-        ) {
-            CardIcon(
-                Icons.Outlined.Code
-            )
-
-            Spacer(
-                modifier =
-                    Modifier.width(14.dp)
-            )
-
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            CardIcon(Icons.Outlined.Code)
+            Spacer(modifier = Modifier.width(14.dp))
             Text(
                 text = "技术栈",
-                style =
-                    MaterialTheme.typography.titleMedium,
-                fontWeight =
-                    FontWeight.Medium
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Medium
             )
         }
-
-        Spacer(
-            modifier =
-                Modifier.height(12.dp)
-        )
-
+        Spacer(modifier = Modifier.height(12.dp))
         FlowRow(
-            horizontalArrangement =
-                Arrangement.spacedBy(8.dp),
-            verticalArrangement =
-                Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             techs.forEach { name ->
                 Surface(
-                    shape =
-                        RoundedCornerShape(8.dp),
-                    color =
-                        MaterialTheme.colorScheme.surfaceContainerHighest
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHighest
                 ) {
                     Text(
                         text = name,
-                        modifier =
-                            Modifier.padding(
-                                horizontal = 10.dp,
-                                vertical = 5.dp
-                            ),
-                        style =
-                            MaterialTheme.typography.labelSmall,
-                        color =
-                            MaterialTheme.colorScheme.onSurfaceVariant
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
@@ -615,48 +421,26 @@ private fun TechCard() {
     }
 }
 
-/**
- * 免责声明卡片
- */
+/** 免责声明卡片 */
 @Composable
 private fun DisclaimerCard() {
     SectionCard {
-        Row(
-            verticalAlignment =
-                Alignment.Top
-        ) {
-            CardIcon(
-                Icons.Outlined.Shield
-            )
-
-            Spacer(
-                modifier =
-                    Modifier.width(14.dp)
-            )
-
+        Row(verticalAlignment = Alignment.Top) {
+            CardIcon(Icons.Outlined.Shield)
+            Spacer(modifier = Modifier.width(14.dp))
             Column {
                 Text(
                     text = "免责声明",
-                    style =
-                        MaterialTheme.typography.titleMedium,
-                    fontWeight =
-                        FontWeight.Medium
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Medium
                 )
-
-                Spacer(
-                    modifier =
-                        Modifier.height(6.dp)
-                )
-
+                Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text =
-                        "本应用仅供个人学习与技术交流使用，请勿用于任何商业用途。" +
-                            "下载内容版权归原作者所有，请于下载后 24 小时内删除。" +
-                            "使用本应用产生的任何后果由使用者自行承担。",
-                    style =
-                        MaterialTheme.typography.bodyMedium,
-                    color =
-                        MaterialTheme.colorScheme.onSurfaceVariant,
+                    text = "本应用仅供个人学习与技术交流使用，请勿用于任何商业用途。" +
+                        "下载内容版权归原作者所有，请于下载后 24 小时内删除。" +
+                        "使用本应用产生的任何后果由使用者自行承担。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     lineHeight = 22.sp
                 )
             }
@@ -664,254 +448,144 @@ private fun DisclaimerCard() {
     }
 }
 
-/**
- * 重新预览欢迎界面入口
- */
+/** 重新预览欢迎界面入口 */
 @Composable
-private fun PreviewOnboardingCard(
-    onClick: () -> Unit
-) {
+private fun PreviewOnboardingCard(onClick: () -> Unit) {
     Card(
         onClick = onClick,
-        modifier =
-            Modifier.fillMaxWidth(),
-        shape =
-            MaterialTheme.shapes.large,
-        colors =
-            CardDefaults.cardColors(
-                containerColor =
-                    MaterialTheme.colorScheme.surfaceContainerLow
-            )
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+        )
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(16.dp),
-            verticalAlignment =
-                Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Surface(
-                modifier =
-                    Modifier.size(40.dp),
-                shape =
-                    CircleShape,
-                color =
-                    MaterialTheme.colorScheme.primaryContainer
+                modifier = Modifier.size(40.dp),
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.primaryContainer
             ) {
-                Box(
-                    contentAlignment =
-                        Alignment.Center
-                ) {
+                Box(contentAlignment = Alignment.Center) {
                     Icon(
-                        imageVector =
-                            Icons.Outlined.Info,
-                        contentDescription =
-                            null,
-                        modifier =
-                            Modifier.size(
-                                20.dp
-                            ),
-                        tint =
-                            MaterialTheme.colorScheme.onPrimaryContainer
+                        imageVector = Icons.Outlined.Info,
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer
                     )
                 }
             }
-
-            Spacer(
-                modifier =
-                    Modifier.width(14.dp)
-            )
-
-            Column(
-                modifier =
-                    Modifier.weight(1f)
-            ) {
+            Spacer(modifier = Modifier.width(14.dp))
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text =
-                        "重新预览欢迎界面",
-                    style =
-                        MaterialTheme.typography.titleMedium,
-                    fontWeight =
-                        FontWeight.Medium
+                    text = "重新预览欢迎界面",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Medium
                 )
-
                 Text(
-                    text =
-                        "重新展示首次启动引导页",
-                    style =
-                        MaterialTheme.typography.bodyMedium,
-                    color =
-                        MaterialTheme.colorScheme.onSurfaceVariant
+                    text = "重新展示首次启动引导页",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-
             Icon(
-                imageVector =
-                    Icons.Outlined.ChevronRight,
-                contentDescription =
-                    null,
-                tint =
-                    MaterialTheme.colorScheme.outline
+                imageVector = Icons.Outlined.ChevronRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.outline
             )
         }
     }
 }
 
-/**
- * 卡片容器统一风格
- */
+/** 卡片容器统一风格 */
 @Composable
-private fun SectionCard(
-    content: @Composable () -> Unit
-) {
+private fun SectionCard(content: @Composable () -> Unit) {
     Card(
-        modifier =
-            Modifier.fillMaxWidth(),
-        shape =
-            MaterialTheme.shapes.large,
-        colors =
-            CardDefaults.cardColors(
-                containerColor =
-                    MaterialTheme.colorScheme.surfaceContainerLow
-            )
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+        )
     ) {
-        Column(
-            modifier =
-                Modifier.padding(16.dp)
-        ) {
-            content()
-        }
+        Column(modifier = Modifier.padding(16.dp)) { content() }
     }
 }
 
-/**
- * 卡片图标圆形底
- */
+/** 卡片图标圆形底 */
 @Composable
-private fun CardIcon(
-    icon: ImageVector
-) {
+private fun CardIcon(icon: ImageVector) {
     Surface(
-        modifier =
-            Modifier.size(40.dp),
-        shape =
-            CircleShape,
-        color =
-            MaterialTheme.colorScheme.primaryContainer
+        modifier = Modifier.size(40.dp),
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.primaryContainer
     ) {
-        Box(
-            contentAlignment =
-                Alignment.Center
-        ) {
+        Box(contentAlignment = Alignment.Center) {
             Icon(
                 imageVector = icon,
                 contentDescription = null,
-                modifier =
-                    Modifier.size(20.dp),
-                tint =
-                    MaterialTheme.colorScheme.onPrimaryContainer
+                modifier = Modifier.size(20.dp),
+                tint = MaterialTheme.colorScheme.onPrimaryContainer
             )
         }
     }
 }
 
-/**
- * 开源仓库入口卡片
- */
+/** 开源仓库入口卡片 */
 @Composable
-private fun GitHubCard(
-    context: android.content.Context
-) {
+private fun GitHubCard(context: android.content.Context) {
     Card(
         onClick = {
-            val intent = Intent(
-                Intent.ACTION_VIEW,
-                Uri.parse(
-                    "https://github.com/STARSHINE56/StarAssistant"
-                )
-            )
-
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(AppLinks.GITHUB_REPO))
             context.startActivity(intent)
         },
-        modifier =
-            Modifier.fillMaxWidth(),
-        shape =
-            MaterialTheme.shapes.large,
-        colors =
-            CardDefaults.cardColors(
-                containerColor =
-                    MaterialTheme.colorScheme.surfaceContainerLow
-            )
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+        )
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(16.dp),
-            verticalAlignment =
-                Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Surface(
-                modifier =
-                    Modifier.size(40.dp),
-                shape =
-                    CircleShape,
-                color =
-                    MaterialTheme.colorScheme.primaryContainer
+                modifier = Modifier.size(40.dp),
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.primaryContainer
             ) {
-                Box(
-                    contentAlignment =
-                        Alignment.Center
-                ) {
+                Box(contentAlignment = Alignment.Center) {
                     Icon(
-                        imageVector =
-                            Icons.Outlined.Code,
-                        contentDescription =
-                            null,
-                        modifier =
-                            Modifier.size(20.dp),
-                        tint =
-                            MaterialTheme.colorScheme.onPrimaryContainer
+                        imageVector = Icons.Outlined.Code,
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer
                     )
                 }
             }
-
-            Spacer(
-                modifier =
-                    Modifier.width(14.dp)
-            )
-
-            Column(
-                modifier =
-                    Modifier.weight(1f)
-            ) {
+            Spacer(modifier = Modifier.width(14.dp))
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text =
-                        "更新地址",
-                    style =
-                        MaterialTheme.typography.titleMedium,
-                    fontWeight =
-                        FontWeight.Medium
+                    text = "开源仓库",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Medium
                 )
-
                 Text(
-                    text =
-                        "查看项目源码",
-                    style =
-                        MaterialTheme.typography.bodyMedium,
-                    color =
-                        MaterialTheme.colorScheme.onSurfaceVariant
+                    text = AppLinks.GITHUB_REPO_DISPLAY,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-
             Icon(
-                imageVector =
-                    Icons.Outlined.OpenInNew,
-                contentDescription =
-                    null,
-                modifier =
-                    Modifier.size(18.dp),
-                tint =
-                    MaterialTheme.colorScheme.outline
+                imageVector = Icons.Outlined.OpenInNew,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.outline
             )
         }
     }

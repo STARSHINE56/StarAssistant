@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -77,7 +78,6 @@ fun DownloadLinkDialog(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-
                 Text(
                     text = "点击「开始下载」后，将保存到 Download 目录。",
                     modifier = Modifier.padding(top = 12.dp),

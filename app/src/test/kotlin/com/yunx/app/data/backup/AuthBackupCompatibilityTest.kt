@@ -18,6 +18,8 @@ class AuthBackupCompatibilityTest {
                 "getAccount" -> state.value
                 "upsert" -> { state.value = args!![0]; Unit }
                 "clear" -> { state.value = null; Unit }
+                // 视频账号是「多行」表：导出时按列表取（本测试不涉及视频平台，返回空表即可）
+                "getAccounts" -> emptyList<Any>()
                 else -> error(method.name)
             }
         } as T
@@ -25,7 +27,7 @@ class AuthBackupCompatibilityTest {
     @Test fun newFieldsRoundTripAndLegacyJsonKeepsAppLoginDefault() = runBlocking {
         val q = dao<QuarkAccountDao>(); val x = dao<XunleiAccountDao>()
         val gy = dao<GuangYaAccountDao>(); val il = dao<ILanzouAccountDao>(); val lz = dao<LanzouAccountDao>()
-        val manager = AuthBackupManager(q,dao(),x,dao(),dao(),dao(),dao(),gy,il,lz)
+        val manager = AuthBackupManager(q,dao(),x,dao(),dao(),dao(),dao(),gy,il,lz,dao())
         q.upsert(QuarkAccountEntity(cookie="old-cookie"))
         x.upsert(XunleiAccountEntity(accessToken="access",refreshToken="refresh",deviceId="device",captchaToken="captcha",authType="web"))
         gy.upsert(GuangYaAccountEntity(accessToken="gy-access",refreshToken="gy-refresh",deviceId="id",deviceSign="sign"))

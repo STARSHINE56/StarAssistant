@@ -135,4 +135,36 @@ class XunleiWebCredentialTest {
         assertEquals(access, XunleiWebCredential.parse(access)?.accessToken)
         assertEquals(access, XunleiWebCredential.parse("Bearer $access")?.accessToken)
     }
+
+    /**
+     * 桌面 client hints 常量必须是**带引号的**品牌字符串（client hints 规范要求），且运行时
+     * 字符串里是普通双引号、**不含反斜杠**——源码里的 `\"` 只是 Kotlin 转义写法。
+     *
+     * 锁死这一点：任何把值改成含反斜杠、或把引号丢掉的做法都会让断言失败。
+     */
+    @Test
+    fun desktopClientHintConstantsMatchChrome() {
+        assertEquals(
+            "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
+            XunleiWebCredential.DESKTOP_SEC_CH_UA
+        )
+        assertEquals("?0", XunleiWebCredential.DESKTOP_SEC_CH_UA_MOBILE)
+        assertEquals("\"Windows\"", XunleiWebCredential.DESKTOP_SEC_CH_UA_PLATFORM)
+        assertFalse(XunleiWebCredential.DESKTOP_SEC_CH_UA.contains('\\'))
+        assertFalse(XunleiWebCredential.DESKTOP_SEC_CH_UA_PLATFORM.contains('\\'))
+    }
+
+    /**
+     * 网页版 captcha_sign 的已知向量（抓包验证过的那一组）。
+     *
+     * 锁死 9 条盐的**内容与顺序**、client_version、host 拼接方式与 `1.` 前缀：
+     * 任何一处被误改都会立刻失败，避免「盐轮换时手改成错的」这种线上事故。
+     */
+    @Test
+    fun computesWebCaptchaSignForKnownVector() {
+        assertEquals(
+            "1.4181a24198c7edfbbba2afbcf1f4fab0",
+            XunleiWebCredential.computeCaptchaSign("550cfe136e9d74e95be5393738639de7", 1792243618981L)
+        )
+    }
 }

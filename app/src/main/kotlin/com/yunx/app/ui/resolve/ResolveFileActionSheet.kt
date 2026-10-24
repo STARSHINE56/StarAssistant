@@ -22,6 +22,8 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -30,11 +32,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.SaveAlt
+import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.rememberModalBottomSheetState
+import com.yunx.app.ui.components.rememberOperationSheetState
+import com.yunx.app.ui.components.OperationSheet
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -76,6 +80,12 @@ internal fun ResolveFileActionSheet(
     saving: Boolean,
     /** 文件：获取下载链接并下载；文件夹不会走到这里 */
     onDownload: () -> Unit,
+    /**
+     * 文件：在线预览（免下载直接查看图片/视频/音频/文本）。
+     * null = 不显示该项 —— 可见性（能否预览）由调用方用 `PreviewTypes.kindOf` 判断好再传进来，
+     * 本弹窗不重复维护一份扩展名列表。
+     */
+    onPreview: (() -> Unit)? = null,
     /** 文件夹：递归下载整个文件夹 */
     onDownloadFolder: () -> Unit,
     /** 点「转存」时准备转存状态（`ResolveViewModel.requestSave`），随后切到转存步骤 */
@@ -86,7 +96,7 @@ internal fun ResolveFileActionSheet(
 ) {
     var step by remember { mutableStateOf(ResolveActionStep.MENU) }
 
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val sheetState = rememberOperationSheetState(saving)
     val scope = rememberCoroutineScope()
 
     /** 先播放退场动画再执行动作（动作里会关掉本弹窗，故不能直接调 onDismiss） */
@@ -97,10 +107,10 @@ internal fun ResolveFileActionSheet(
         }
     }
 
-    ModalBottomSheet(
-        onDismissRequest = { if (!saving) onDismiss() },
+    OperationSheet(
+        busy = saving,
+        onDismiss = onDismiss,
         sheetState = sheetState,
-        containerColor = MaterialTheme.colorScheme.surface
     ) {
         // 步骤切换统一带过渡（与网盘页文件操作弹窗的菜单→移动到/分享 一致）
         AnimatedContent(
@@ -112,6 +122,7 @@ internal fun ResolveFileActionSheet(
                 ResolveActionStep.MENU -> Column(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
                         .padding(start = 24.dp, end = 24.dp, top = 4.dp, bottom = 32.dp)
                 ) {
                     // 顶部：图标 + 文件名 + 类型（与网盘页文件操作弹窗同一组件，观感一致）
@@ -137,6 +148,17 @@ internal fun ResolveFileActionSheet(
                             desc = "获取下载链接并保存到本机",
                             tint = MaterialTheme.colorScheme.primary,
                             onClick = { act(onDownload) }
+                        )
+                    }
+
+                    // 在线预览：仅文件、且调用方判定为可预览类型时显示（放在「下载」之后、「转存」之前）
+                    if (!file.isdir && onPreview != null) {
+                        ActionItem(
+                            icon = Icons.Outlined.Visibility,
+                            title = "在线预览",
+                            desc = "不下载，直接在应用内查看",
+                            tint = MaterialTheme.colorScheme.primary,
+                            onClick = { act(onPreview) }
                         )
                     }
 

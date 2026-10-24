@@ -167,6 +167,28 @@ class SettingsRepository(context: Context) {
         get() = prefs.getString("announcement_base_url", "").orEmpty()
         set(value) { prefs.edit().putString("announcement_base_url", com.yunx.app.data.announcement.AnnouncementSource.normalize(value)).apply() }
 
+
+    /**
+     * 下载调试（设置 → 关于云析 → 长按 → 开发调试）：默认关。
+     * 开启后按下载任务记录事件流（主要变更节点 / 错误节点），下载页长按任务可进「调试信息」页查看并导出；
+     * **关闭会清空全部日志**（见 `DownloadDebugLog`），所以设置页关开关前有二次确认弹窗。
+     */
+    var downloadDebug: Boolean
+        get() = prefs.getBoolean("download_debug", false)
+        set(value) {
+            prefs.edit().putBoolean("download_debug", value).apply()
+        }
+
+    /**
+     * 全量 SHA-256 校验（开发调试菜单，**默认关**）：开启后保存文件时顺带算出整文件摘要，
+     * 写进下载调试日志（「全量校验」事件）。合并那一遍本来就在读所有字节，所以不额外读盘，只多一点 CPU。
+     */
+    var fullFileSha256: Boolean
+        get() = prefs.getBoolean("download_full_sha256", false)
+        set(value) {
+            prefs.edit().putBoolean("download_full_sha256", value).apply()
+        }
+
     /** 忽略 SSL 证书校验（抓包调试用，隐藏菜单开启；默认关闭） */
     var ignoreSslCert: Boolean
         get() = prefs.getBoolean("ignore_ssl_cert", false)
@@ -233,6 +255,53 @@ class SettingsRepository(context: Context) {
             prefs.edit().putInt("proxy_port", value.coerceIn(1, 65535)).apply()
         }
 
+    /**
+     * 某个深链接注册项是否启用（默认开）。
+     *
+     * ★ 这里只存「用户意愿」，真正的生效方式是启停清单里对应的 activity-alias ——
+     *   改完必须立刻调 [com.yunx.app.util.LinkOpener.apply]，否则要等下次启动才同步。
+     */
+    fun linkOpen(target: LinkOpenTarget): Boolean = prefs.getBoolean(target.prefKey, true)
+
+    fun setLinkOpen(target: LinkOpenTarget, enabled: Boolean) {
+        prefs.edit().putBoolean(target.prefKey, enabled).apply()
+    }
+
+    /**
+     * 多账号下载（**实验性**，代号 C1）：默认关。
+     *
+     * 开启后，同一个网盘登录了多个账号时，批量下载会把每个文件轮换交给不同账号去取直链，
+     * 绕开单账号的并发数 / 限速限制（每个文件仍只用一个账号下载）。
+     * ★ 只有「账号列表里不止一个账号」的平台才有实际效果；开启前设置页有二次风险确认。
+     */
+    var multiAccountDownload: Boolean
+        get() = prefs.getBoolean("multi_account_download", false)
+        set(value) {
+            prefs.edit().putBoolean("multi_account_download", value).apply()
+        }
+
+    /**
+     * 单文件多源分片（**实验性**，代号 C2）：默认关，**依赖 [multiAccountDownload]**。
+     *
+     * 开启后，同一个文件用多个账号各取一条直链，分片轮流交给不同直链下载（真正提速单个大文件）。
+     * 目前只覆盖夸克 / UC / 迅雷 / 百度；其他平台即使开着也退回单源。
+     * ★ 关掉 C1 时必须一起关掉它（设置页与读取处都按「C1 关 ⇒ C2 无效」处理），
+     *   否则会出现「多账号下载关了、单文件还在多账号取链」的不一致状态。
+     */
+    var multiSourceDownload: Boolean
+        get() = prefs.getBoolean("multi_source_download", false)
+        set(value) {
+            prefs.edit().putBoolean("multi_source_download", value).apply()
+        }
+
+    /** C2 是否真正生效：开关开着且 C1 也开着（C2 依赖 C1，见 [multiSourceDownload]） */
+    fun multiSourceActive(): Boolean = multiAccountDownload && multiSourceDownload
+
+    /** 关闭 C1 时强制关掉 C2（C2 依赖 C1）：设置页切 C1 与读取端都用这一处口径 */
+    fun disableMultiSource() {
+        prefs.edit().putBoolean("multi_source_download", false).apply()
+    }
+
     companion object {
         const val DEFAULT_DOWNLOAD_THREADS = 32
 
@@ -242,12 +311,10 @@ class SettingsRepository(context: Context) {
         /** 下载引擎标识：内置 Gopeed 引擎（gomobile 核心，需用户导入 AAR） */
         const val ENGINE_GOPEED = "gopeed"
         /**
-         * 线程数上限 = 512（与设置页档位一致）。
-         * 真正同时在飞的请求数另由 `DownloadManager.MAX_INFLIGHT_CHUNKS`（按最大堆预算推导、同样封顶 512）
-         * 与全进程 `inflightLimiter` 钉住：下载客户端已固定 HTTP/1.1，每路只占一条连接 + 64KB 读缓冲
-         * （256MB 堆 → 512 × 64KB = 32MB = 堆的 1/8，本机 FD 软限 32768），
-         * 所以这里放开到 512 不会再像 HTTP/2 时代那样把堆撑满（见 Agent.md §5.1.1）。
-         * 旧版本存过 128/256/512 的用户现在能真正用上这些档位。
+         * 保留历史设置上限 512，避免丢失用户配置。
+         * 内置引擎将该值视为自适应并发的上限，而非必须建立的连接数。
+         * 真实在飞请求受全局堆预算及线程/TLS资源安全上限（128）约束；迅雷仍最多 8 路。
+         * Gopeed 使用自身引擎的连接策略，不共享内置引擎的分片自适应实现。
          */
         const val MAX_DOWNLOAD_THREADS = 512
         const val XUNLEI_DOWNLOAD_THREADS = 8
