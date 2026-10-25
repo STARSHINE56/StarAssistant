@@ -68,21 +68,22 @@ class DownloadTransferPolicyTest {
     @Test fun adaptiveOnlyKeepsUsefulIncreases() {
         var now = 0L
         val policy = AdaptiveConnections(64) { now }
-        assertEquals(8, policy.limit)
-        policy.sample(1000, true)
-        policy.sample(1000, true)
+        // ★ 起始并发 16（原 8）：网盘 CDN 按连接限速，16 起跑避免前十几秒浪费在爬升上
         assertEquals(16, policy.limit)
-        policy.sample(1000, true)
-        assertEquals(8, policy.limit)
+        policy.sample(1000, true)      // 建立基线
+        policy.sample(1000, true)      // 翻倍到 32 并进入探针
+        assertEquals(32, policy.limit)
+        policy.sample(1000, true)      // 没提速 → 回退到 16 并冻结 30s
+        assertEquals(16, policy.limit)
         now = 31_000
         policy.sample(1000, true)
         policy.sample(1000, true)
-        policy.sample(1800, true)
+        policy.sample(1800, true)      // 提速 80% → 保留 32
+        assertEquals(32, policy.limit)
+        policy.congested(2000)         // 拥塞 → 减半
         assertEquals(16, policy.limit)
-        policy.congested(2000)
-        assertEquals(8, policy.limit)
-        policy.sample(10000, true)
-        assertEquals(8, policy.limit)
+        policy.sample(10000, true)     // 冻结期内不再变化
+        assertEquals(16, policy.limit)
         policy.serialVerification()
         now = 100_000
         policy.sample(10000, true)
@@ -91,9 +92,9 @@ class DownloadTransferPolicyTest {
     @Test fun memoryPressureReducesAndNoBacklogDoesNotGrow() {
         val policy = AdaptiveConnections(32)
         repeat(4) { policy.sample(100000, false) }
+        assertEquals(16, policy.limit)          // 起始并发 16（原 8）
+        policy.sample(100000, true, true)       // 内存压力 → 减半
         assertEquals(8, policy.limit)
-        policy.sample(100000, true, true)
-        assertEquals(4, policy.limit)
         assertTrue(policy.blockBytes(Long.MAX_VALUE / 100) in 1024 * 1024L..16 * 1024 * 1024L)
     }
     @Test fun permitsBoundConcurrencyAndReleaseOnFailure() = runBlocking {

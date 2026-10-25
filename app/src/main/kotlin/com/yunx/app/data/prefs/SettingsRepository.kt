@@ -303,7 +303,12 @@ class SettingsRepository(context: Context) {
     }
 
     companion object {
-        const val DEFAULT_DOWNLOAD_THREADS = 32
+        /** 下载线程数默认值。
+         *  ★ 2026-10-25 由 32 提到 64：对标 Gopeed 引擎的默认 connections（64）。
+         *  网盘 CDN 按连接限速，并发数是下载速度最直接的杠杆；真实并发仍受
+         *  MAX_INFLIGHT_CHUNKS（按堆预算推导，封顶 128）与 AdaptiveConnections 双重约束，
+         *  不会因为改了这个值就在低端机上加倍吃内存。 */
+        const val DEFAULT_DOWNLOAD_THREADS = 64
 
         /** 下载引擎标识（[downloadEngine] 的取值）：内置 Kotlin 分片下载器 */
         const val ENGINE_BUILTIN = "builtin"

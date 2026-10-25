@@ -69,7 +69,16 @@ internal class ResumableTail(private val dir: File, private val start: Long, pri
 
 /** Per-task adaptive admission. Waiting does not consume the global IO/network permit. */
 internal class AdaptiveConnections(val maximum: Int, private val clock: () -> Long = { System.nanoTime() / 1_000_000 }) {
-    @Volatile var limit = minOf(8, maximum.coerceAtLeast(1)); private set
+    /**
+     * 起始并发。
+     *
+     * ★ 2026-10-25 由固定 8 改为「一半上限、最多 16」（对齐 Gopeed/MoePal 的做法）：
+     *   网盘 CDN 普遍是**按连接限速**，8 路常常只跑出总带宽的一小部分，而自适应探针
+     *   要 10-15 秒才爬到高并发——中小文件早就下完了，整段都在低并发区间。
+     *   直接从 16 起跑，探针照旧在提速无效时回退，安全性由 congested()/探针双重兜底。
+     *   上限小于等于 8 的平台（如迅雷 RANGE_WORKERS_CAP）行为不变。
+     */
+    @Volatile var limit = minOf(16, maximum.coerceAtLeast(1)); private set
     private var active = 0
     private var until = 0L
     private var freezeUntil = 0L
