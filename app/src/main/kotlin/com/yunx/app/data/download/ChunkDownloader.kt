@@ -10,6 +10,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import kotlin.random.Random
 import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -260,7 +261,12 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
                 }
                 null -> {
                     // 抢占属于「换连接」，绝不等退避；只有真实 IO 异常才退避
-                    if (!preempted && attempt < attempts - 1) delay((500L * (attempt + 1)).coerceAtMost(3000))
+                    // ★ 加抖动（2026-10-25）：确定性退避下，几十路分片同时因网络抖动失败时
+                    //   会在同一毫秒集体重试，人为制造流量尖峰——正是最容易触发服务端风控的模式。
+                    if (!preempted && attempt < attempts - 1) {
+                        val base = (500L * (attempt + 1)).coerceAtMost(3000)
+                        delay(base / 2 + Random.nextLong(base / 2 + 1))
+                    }
                 }
             }
         }
@@ -317,9 +323,14 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
                     return@use ChunkResult.FAILED
                 }
                 // 防盗链/过期回退页：记录后交由上层尝试重新取链
+                // ★ 但 HTML 页也可能是**风控拦截**（国内网盘几乎不返回 429，而是 200 + 风控页），
+                //   所以同时按拥塞处理，把并发减半。若真是直链过期，多减半一次无害；
+                //   若是风控，能立刻降低强度，避免把惩罚期越拖越长（BaiduPCS-Go 实测的
+                //   「几小时到几天接近 0 速」就是持续高并发撞风控的结果）。
                 if (response.header("Content-Type").orEmpty().contains("text/html", ignoreCase = true)) {
                     markSourceExpiryFailure(taskId, statusCode)
-                    Log.w(TAG, "downloadChunk: task=$taskId 返回 text/html（疑似过期/错误页），终止")
+                    onCongestion?.invoke(2_000L)
+                    Log.w(TAG, "downloadChunk: task=$taskId 返回 text/html（疑似过期/风控页），终止并降速")
                     return@use ChunkResult.FAILED
                 }
                 when (val code = statusCode) {

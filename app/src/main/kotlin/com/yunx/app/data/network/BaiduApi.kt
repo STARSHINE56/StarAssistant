@@ -321,21 +321,43 @@ suspend fun listShare(surl: String, sekey: String, dir: String, cookie: String, 
             .build()
         val json = executeJson(request)
         checkErrno(json, "获取高速下载链接失败")
-        // 直链候选选择：优先 encrypt=0（明文，无需解密）的 https 直链（appall01/02）；
-        // rank1 的 d2-ant 为 encrypt=1 加密通道（需 AES-CTR 解密且部分网络 TLS 握手失败），直接排除；
-        // 全部为加密通道时退回第一个 https 候选（仍有尝试价值），最后兜底第一个候选。
+        // 直链候选选择（2026-10-25 重写）：
+        //  1) 先剔除**限速通道**主机（见 SPEED_LIMITED_HOSTS）——非会员常被下发 d2-ant 系列，
+        //     它同时也是 encrypt=1 加密通道，旧版只是因为「加密」才顺带跳过；
+        //     显式按主机名排除更稳，即使哪天百度把限速通道改成明文也不会选错。
+        //  2) 再优先 encrypt=0（明文，无需 AES-CTR 解密）且走 https 的候选。
+        //  3) 全被剔除时按原顺序兜底（宁可慢也别直接失败）。
         val urls = json.optJSONArray("urls")
         val candidates = (0 until (urls?.length() ?: 0))
             .mapNotNull { urls?.optJSONObject(it) }
             .filter { it.optString("url").isNotBlank() }
-        val directUrl = candidates
+        val fast = candidates.filterNot { isSpeedLimitedHost(it.optString("url")) }
+        val directUrl = fast
             .filter { it.optInt("encrypt", 1) == 0 }
             .sortedBy { !it.optString("url").startsWith("https") }
             .firstOrNull()?.optString("url")
+            ?: fast.firstOrNull { it.optString("url").startsWith("https") }?.optString("url")
+            ?: fast.firstOrNull()?.optString("url")
             ?: candidates.firstOrNull { it.optString("url").startsWith("https") }?.optString("url")
             ?: candidates.firstOrNull()?.optString("url")
             ?: throw BaiduApiException("未返回下载链接")
         directUrl
+    }
+
+    /**
+     * 判断候选直链是否落在百度的**限速通道**上。
+     *
+     * `-ant` 系列（`d2-ant` 等）是百度给非会员下发的限速/反盗链节点，速度被压到很低。
+     * 会员走 `appallNN.baidupcs.com` 一类的明文通道。这里按主机名后缀匹配，
+     * 不依赖 `encrypt` 标志（那个标志表达的是「是否加密」，与限速只是碰巧重合）。
+     *
+     * 匹配不到时返回 false —— 宁可少剔除，也不能因为名单过宽把可用直链全干掉。
+     */
+    private fun isSpeedLimitedHost(url: String): Boolean {
+        val host = runCatching { java.net.URI(url).host?.lowercase() }.getOrNull() ?: return false
+        if (host.isEmpty()) return false
+        return SPEED_LIMITED_HOSTS.any { host == it || host.endsWith(".$it") } ||
+            SPEED_LIMITED_HOST_PATTERNS.any { it.containsMatchIn(host) }
     }
 
     /**
@@ -597,4 +619,21 @@ suspend fun listShare(surl: String, sekey: String, dir: String, cookie: String, 
     }
 
     private fun urlEncode(value: String): String = URLEncoder.encode(value, "UTF-8")
+
+    private companion object {
+        /**
+         * 百度的限速/反盗链通道主机（后缀匹配）。
+         *
+         * `d2-ant` 是非会员最常见的限速节点，实测速度被压在很低；会员走 appall 系列明文通道。
+         * 名单保持保守：只列出确认属于限速体系的，宁可少剔除也不要把可用直链干掉
+         * （匹配不到时代码会继续走兜底候选）。
+         */
+        val SPEED_LIMITED_HOSTS = listOf(
+            "d2-ant.baidu.com",
+            "ant.baidu.com",
+        )
+
+        /** 主机名里带 `-ant` 的百度 CDN 一律视为限速通道（覆盖 d2-ant01/d2-ant02 这类编号变体）。 */
+        val SPEED_LIMITED_HOST_PATTERNS = listOf(Regex("""^[a-z0-9-]*-ant[0-9]*\.baidu\.com$"""))
+    }
 }
