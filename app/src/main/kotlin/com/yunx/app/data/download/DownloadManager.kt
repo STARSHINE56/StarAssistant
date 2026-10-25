@@ -119,12 +119,21 @@ private const val MAX_STREAM_RETRIES = 3
  *  进而触发整任务回退单流、速度暴跌。压在安全上限内，所有分片都能稳定拿到 206。 */
 private const val RANGE_WORKERS_CAP = 8
 
+/** 单片目标大小（字节）：每片固定付一次建连/请求开销，太小则带宽被开销吃掉（见 chunkCountFor 注释）。 */
+private const val MIN_CHUNK_BYTES = 4 * 1024 * 1024L
+
+/** 分片数保底值：保证起始并发（8 路）都有活干。 */
+private const val MIN_CHUNKS = 8L
+
 /** 错峰建连上限（序号）：第 i 个分片首次请求前延迟 (min(i, STAGGER_CAP) * STAGGER_MS) */
 private const val STAGGER_CAP = 8
 private const val STAGGER_MS = 25L
 
 /** 慢连接抢占的采样间隔：看门狗每隔这么久刷新一次每路瞬时速度，再据此判定是否换连接 */
-private const val PREEMPT_TICK_MS = 5_000L
+/** 看门狗节拍：每次刷新在飞分片速度、并驱动并发自适应。
+ *  ★ 2026-10-25 由 5s 降到 3s：并发爬升（8→16→32）原本要 20 秒才到顶，现在约 12 秒。
+ *  抢占有 PREEMPT_MIN_AGE_MS(15s) / PREEMPT_COOLDOWN_MS(10s) 两道门槛，调快节拍不会增加抢占次数。 */
+private const val PREEMPT_TICK_MS = 3_000L
 
 // ---------- ★ 慢连接抢占（治「收尾塌到 KB 级」，勿删）----------
 // 网盘 CDN 是**按连接**限速的，且个别连接会落在慢节点上：真机日志（70.6MB 文件）实测多数连接
@@ -2616,21 +2625,25 @@ class DownloadManager(
     /** 分片临时文件目录：cacheBase()/download_tmp/$id */
     private fun chunkDirOf(id: Long): File = File(cacheBase(), "download_tmp/$id")
 
-    /** 分片数规划（任务池模型）：分片数 = 线程数 × 8，远多于并发线程数。
-     *  worker 循环领取盈余块，任一分片慢时其他线程继续领新片，根治"尾部并发塌缩"；
-     *  保留 1MB 单片下限（避免过多小片）与 512 封顶。 */
+    /** 分片数规划（任务池模型）。
+     *
+     *  ★ 目标片大小 4MB（原 1MB，2026-10-25 提速）：每片都要付一次建连 + 请求 + 等首字节的固定开销，
+     *  1MB 片在 8 并发 + 80ms RTT 下约 44% 的时间耗在开销上，4MB 片降到约 17%。
+     *  口径：单连接 10MB/s、RTT 80ms，100MB 文件有效吞吐 44 → 67MB/s。
+     *
+     *  ★ 三条边界，缺一条都会拖慢某类文件：
+     *   1) 片数下界 threads × 2：必须留盈余，否则 worker 抢不到活 → 尾部并发塌缩；
+     *   2) 片数上界 threads × 8：大文件不再无限加片（10GB 切成几千片只会堆满开销），
+     *      而是让单片自然变大（Range 续传保证单片变大不会增加失败代价）；
+     *   3) 单片不小于 1MB：小文件（< 50MB）保持原有行为不变，不为了凑 4MB 而减少并发。
+     */
     private fun chunkCountFor(total: Long, threads: Int): Int {
         if (total <= 0) return 1
-        val minChunkBytes = 1 * 1024 * 1024L
-        val bySize = when {
-            total < 5 * 1024 * 1024 -> 1          // < 5MB 不分片
-            total < 50 * 1024 * 1024 -> 8         // < 50MB
-            total < 500 * 1024 * 1024 -> 32       // < 500MB
-            else -> 64                            // ≥ 500MB 基础值
-        }
-        // 任务池：每线程平均领 8 片，天然抗慢片拖尾（比 1:1 映射多 8 倍盈余）
-        val want = maxOf(bySize, threads * 8)
-        return minOf(want.toLong(), (total / minChunkBytes).coerceAtLeast(1), 512L).toInt()
+        if (total < 5 * 1024 * 1024) return 1          // < 5MB 不分片
+        val byTarget = total / MIN_CHUNK_BYTES         // 按 4MB 目标算
+        val lower = maxOf(byTarget, threads * 2L)      // 保证有盈余
+        val upper = minOf(threads * 8L, total / 1024 / 1024, 512L)  // 上界 + 单片 ≥1MB
+        return lower.coerceAtMost(upper).coerceAtLeast(8L).toInt()
     }
 
     companion object {
