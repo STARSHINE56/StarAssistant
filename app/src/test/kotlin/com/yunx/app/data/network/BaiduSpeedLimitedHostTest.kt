@@ -22,7 +22,7 @@ class BaiduSpeedLimitedHostTest {
     private fun limited(url: String): Boolean {
         val host = runCatching { java.net.URI(url).host?.lowercase() }.getOrNull() ?: return false
         if (host.isEmpty()) return false
-        return hosts.any { host == it || host.endswith(".$it") } ||
+        return hosts.any { host == it || host.endsWith(".$it") } ||
             patterns.any { it.containsMatchIn(host) }
     }
 
