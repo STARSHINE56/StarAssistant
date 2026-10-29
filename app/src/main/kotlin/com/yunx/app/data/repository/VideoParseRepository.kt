@@ -40,7 +40,14 @@ import okhttp3.OkHttpClient
  */
 class VideoParseRepository internal constructor(
     private val accounts: VideoAccountRepository,
-    private val clientProvider: () -> OkHttpClient = { HttpClients.apiClient() }
+    private val clientProvider: () -> OkHttpClient = { HttpClients.apiClient() },
+    /**
+     * 解析总闸（节流 → 熔断 → 各平台解析器 → 通用嗅探兜底）。
+     *
+     * ★ 放成构造参数而不是单例，是为了让上层（或测试）能换一份独立的闸门状态；
+     *   生产环境用默认值即可 —— 进程内只有这一个 [VideoParseRepository]，天然全局共享。
+     */
+    private val gateway: VideoParserGateway = VideoParserGateway()
 ) {
 
     /** 从任意文本里识别并解析视频；识别不到视频链接返回 null（调用方据此回退到网盘解析） */
@@ -59,8 +66,16 @@ class VideoParseRepository internal constructor(
             )
         // Cookie 用「当前生效账号」（主账号优先）；未登录为空串，由解析器决定匿名可用还是提示登录
         val cookie = accounts.activeCookie(resolved.platform)
-        return parser.parse(resolved, cookie).withSecureMediaUrls()
+        // 走总闸而不是直接 parser.parse：节流/熔断/兜底都在网关里，仓库只负责「认链接、取 Cookie」
+        return gateway.parse(resolved, cookie, parser).withSecureMediaUrls()
     }
+
+    /**
+     * 用户手动点「重试」时调用：清空熔断状态，给他一次干净的重来机会。
+     *
+     * ★ 只清熔断，不清节流的最后一次放行时间 —— 用户连点两次也不该真的连发两个请求。
+     */
+    suspend fun resetCooldown() = gateway.resetCooldown()
 
     /**
      * 展开短链（v.douyin.com / xhslink.com / b23.tv …）：跟随一次重定向拿到最终地址后重新识别。

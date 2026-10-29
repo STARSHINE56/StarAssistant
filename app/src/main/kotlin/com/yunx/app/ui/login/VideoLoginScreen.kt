@@ -92,9 +92,10 @@ import kotlinx.coroutines.launch
  * ★ **没有网页登录页**的平台（[VideoPlatform.manualCookieOnly]）在这里被转交给
  *   [ManualCookieLoginScreen]：整页只做手动填 Cookie，一个 WebView 都不建。
  *
- * ★ 之所以把 cookieDomain 补成完整 URL 再读 Cookie：Android 的 `CookieManager.getCookie()`
- *   入参是 **URL**（需要 scheme），而 [VideoPlatform.cookieDomain] 存的是裸域（如 `bilibili.com`），
- *   直接传会读不到任何 Cookie，自动检测就永远不会触发。
+ * ★ 读 Cookie 统一走 [WebCookieReader]，**不要**在这里直接 `CookieManager.getCookie(...)`：
+ *   该 API 只返回与传入 URL 匹配的 Cookie，而登录态落在哪个子域由站点决定（`passport.` 登录、
+ *   `www.` 种凭证、或 host-only 只对 `www` 生效）。只读一个地址的表现就是「网页里已经登录，
+ *   点保存却说未检测到登录态」—— 详见 [WebCookieReader] 类注释。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -139,12 +140,6 @@ fun VideoLoginScreen(
     // 登录教程弹窗：进入页面即展示一次
     var showTutorial by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { showTutorial = true }
-
-    // 读 WebView 登录态的地址（补 scheme，见类注释）
-    val cookieUrl = remember(platform) {
-        if (platform.cookieDomain.startsWith("http")) platform.cookieDomain
-        else "https://${platform.cookieDomain}"
-    }
 
     /**
      * 实际写进 WebView 的 UA = 平台模板 + **内核真实的 Chrome 大版本号**。
@@ -207,7 +202,9 @@ fun VideoLoginScreen(
                         baselineCaptured = true
                         scope.launch {
                             delay(GUEST_COOKIE_BASELINE_DELAY_MS)
-                            guestCookie = CookieManager.getInstance().getCookie(cookieUrl).orEmpty()
+                            // 与「保存」用同一条读取路径（多域合并），否则基线与实际凭证口径不一致，
+                            // `it != guestCookie` 永远成立，页面一打开就可能被误判成已登录
+                            guestCookie = WebCookieReader.read(platform)
                         }
                     }
                 }
@@ -249,7 +246,7 @@ fun VideoLoginScreen(
 
     // 自动登录检测：网页内登录完成（整域 Cookie 出现并通过解析器校验）即自动保存；右上角「保存」作手动兜底
     rememberWebLoginAutoDetect(
-        sampleCredential = { CookieManager.getInstance().getCookie(cookieUrl).orEmpty() },
+        sampleCredential = { WebCookieReader.read(platform) },
         // 凭证必须与「游客基线」不同：游客 Cookie 非空但不是登录态（见 guestCookie 的说明）。
         // 基线尚未取到时不做限制（否则会阻塞登录）。
         isPlausible = { it.isNotBlank() && it != guestCookie },
@@ -316,14 +313,19 @@ fun VideoLoginScreen(
                         onClick = {
                             scope.launch {
                                 isSaving = true
-                                val cookie = CookieManager.getInstance().getCookie(cookieUrl).orEmpty()
-                                val saved = viewModel.save(platform, cookie, newAccount) != null
+                                val cookie = WebCookieReader.read(platform)
+                                val nickname = viewModel.save(platform, cookie, newAccount)
                                 isSaving = false
-                                if (saved) {
-                                    SnackbarController.show("登录成功")
+                                if (nickname != null) {
+                                    // 空昵称 = 校验接口被风控挡住，按 Cookie 形态接受的登录态：
+                                    // 能用，但值得让用户立刻试一条确认（比让他在登录页反复重试强）
+                                    SnackbarController.show(
+                                        if (nickname.isBlank()) "已保存（未取到昵称，建议先解析一条确认）"
+                                        else "登录成功"
+                                    )
                                     onSaved()
                                 } else {
-                                    SnackbarController.show("未检测到登录态，请先完成登录")
+                                    SnackbarController.show(saveFailureHint(platform, cookie))
                                 }
                             }
                         },
@@ -673,3 +675,37 @@ private fun ManualCookieLoginScreen(
  */
 private fun normalizePastedCookie(raw: String): String =
     raw.trim().replace(Regex("^cookie\\s*:\\s*", RegexOption.IGNORE_CASE), "")
+
+/**
+ * 保存失败时给用户的提示：**能说清是哪一步没成，就不要只说「未检测到登录态」**。
+ *
+ * 用户看到的「未检测到登录态」原本有四种完全不同的成因，提示却一模一样：
+ * 1. 根本没读到大域 Cookie（登录动作发生在别的子域 / WebView 还没落盘）；
+ * 2. 读到了 Cookie，但里面缺这个平台的关键登录字段（页面还停在登录表单）；
+ * 3. Cookie 齐全但已过期；
+ * 4. 校验接口被风控挡住（网络/403），与登录态无关。
+ *
+ * 这里按「有没有 Cookie」「关不关登录键」两刀切开前三类，第 4 类交给解析器内部记录诊断日志。
+ * 提示里点名缺哪个键，用户就知道该去确认什么（B 站没登录成功就是缺 `SESSDATA`）。
+ */
+private fun saveFailureHint(platform: VideoPlatform, cookie: String): String {
+    if (cookie.isBlank()) {
+        DiagnosticLog.warn(DiagnosticLog.NETWORK, "login_no_cookie", "platform=${platform.name}")
+        return "没读到网页登录态：请确认网页里已登录成功（右上角出现头像）后再点保存"
+    }
+    // 只记键名，不记值 —— 日志会被用户导出发给开发者
+    val keys = cookie.split(';').map { it.substringBefore('=').trim() }.filter { it.isNotEmpty() }
+    DiagnosticLog.warn(
+        DiagnosticLog.NETWORK, "login_cookie_shape",
+        "platform=${platform.name} keys=${keys.take(20)}"
+    )
+    val requiredKey = when (platform) {
+        VideoPlatform.BILIBILI -> "SESSDATA"
+        VideoPlatform.XHS -> "web_session"
+        else -> null
+    }
+    if (requiredKey != null && !WebCookieReader.hasKey(cookie, requiredKey)) {
+        return "网页里还没登录成功（缺少 $requiredKey），请先完成登录"
+    }
+    return "未检测到登录态，请先完成登录"
+}

@@ -99,6 +99,15 @@ enum class VideoParseErrorKind {
     /** 链接形态不支持，或该平台必须登录但当前没有登录态 */
     UNSUPPORTED,
 
+    /**
+     * 该平台刚刚连续失败，闸门正在冷却（见 `ParseGuard`）。
+     *
+     * ★ 与 [BLOCKED] 的区别：[BLOCKED] 是平台明确拒绝（403/418），用户重试也没用；
+     *   [COOLDOWN] 是**我们自己**决定暂停 —— 等冷却结束后再试很可能就好了。提示文案必须
+     *   告诉用户「等多久」，否则他会以为软件坏了，一直点。
+     */
+    COOLDOWN,
+
     /** 其他（响应格式变了、平台改版等） */
     UNKNOWN
 }
@@ -121,5 +130,7 @@ fun VideoParseException.userMessage(): String = when (kind) {
     VideoParseErrorKind.NOT_FOUND -> "内容不存在、已删除或不可见"
     VideoParseErrorKind.NETWORK -> "网络请求失败，请检查网络后重试"
     VideoParseErrorKind.UNSUPPORTED -> message?.takeIf { it.isNotBlank() } ?: "暂不支持该链接"
+    // 冷却文案取 message（里面带了「还要等几秒」），拿不到时给一句兜底
+    VideoParseErrorKind.COOLDOWN -> message?.takeIf { it.isNotBlank() } ?: "该平台暂时不可用，请稍后再试"
     VideoParseErrorKind.UNKNOWN -> message?.takeIf { it.isNotBlank() } ?: "解析失败，请稍后重试"
 }
