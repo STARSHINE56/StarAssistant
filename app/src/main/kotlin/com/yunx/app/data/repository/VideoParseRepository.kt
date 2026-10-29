@@ -25,6 +25,7 @@ import com.yunx.app.data.network.video.VideoLinkParser
 import com.yunx.app.data.network.video.VideoParseErrorKind
 import com.yunx.app.data.network.video.VideoParseException
 import com.yunx.app.data.network.video.VideoParseResult
+import com.yunx.app.data.network.video.VideoParserGateway
 import com.yunx.app.data.network.video.VideoParsers
 import com.yunx.app.data.network.video.VideoPlatform
 import okhttp3.OkHttpClient
