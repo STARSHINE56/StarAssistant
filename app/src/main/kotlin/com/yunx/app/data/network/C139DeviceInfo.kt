@@ -72,7 +72,9 @@ data class C139DeviceInfo(
             @Suppress("DEPRECATION")
             val legacyLocale = configuration.locale
             val locale = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                configuration.locales.firstOrNull() ?: legacyLocale ?: Locale.getDefault()
+                // locales 是 android.os.LocaleList（不是 List，没有 firstOrNull），只能按 size()/get() 取
+                val locales = configuration.locales
+                if (locales.size() > 0) locales[0] else (legacyLocale ?: Locale.getDefault())
             } else {
                 legacyLocale ?: Locale.getDefault()
             }
