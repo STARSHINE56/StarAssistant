@@ -34,8 +34,6 @@ internal fun SyncedFeaturesSettings(onEngineClick: () -> Unit) {
     var proxyPort by remember { mutableStateOf(settings.proxyPort.toString()) }
     var noSave by remember { mutableStateOf(settings.quarkNoSaveDownload) }
     var diagnostic by remember { mutableStateOf(settings.diagnosticMode) }
-    var sourceDialog by remember { mutableStateOf(false) }
-    var announcementSource by remember { mutableStateOf(settings.announcementBaseUrl) }
     Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             TextButton(onClick = onEngineClick) { Text("下载引擎：内置 / Gopeed（磁力下载）") }
@@ -62,26 +60,9 @@ internal fun SyncedFeaturesSettings(onEngineClick: () -> Unit) {
             }
             TextButton(onClick = { showMirrorDialog = true }) { Text("GitHub 下载镜像") }
             TextButton(onClick = { showProxyDialog = true }) { Text("网络代理") }
-            TextButton(onClick = { sourceDialog = true }) { Text(if (announcementSource.isBlank()) "公告来源：官方 COS" else "公告来源：已配置") }
         }
     }
     Spacer(Modifier.height(6.dp))
-    if (sourceDialog) {
-        var input by remember { mutableStateOf(announcementSource) }
-        var error by remember { mutableStateOf<String?>(null) }
-        AlertDialog(onDismissRequest = { sourceDialog = false }, title = { Text("星辰助手公告来源") }, text = {
-            Column {
-                Text("默认使用官方 COS，无需填写。可选填 HTTPS JSON 地址或兼容 API 地址；留空恢复官方来源，保存后重启生效。")
-                OutlinedTextField(input, { input = it; error = null }, label = { Text("HTTPS 地址") }, isError = error != null, singleLine = true)
-                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-            }
-        }, confirmButton = { TextButton(onClick = {
-            runCatching { settings.announcementBaseUrl = input }.onSuccess {
-                announcementSource = settings.announcementBaseUrl; sourceDialog = false
-                SnackbarController.show("公告来源已保存，重启应用后生效")
-            }.onFailure { error = it.message }
-        }) { Text("保存") } }, dismissButton = { TextButton(onClick = { sourceDialog = false }) { Text("取消") } })
-    }
     // GitHub 下载镜像前缀设置弹窗（留空 = 使用内置默认镜像）
     if (showMirrorDialog) {
         // 弹窗内临时输入：打开时带出当前已保存的自定义前缀（无则空）

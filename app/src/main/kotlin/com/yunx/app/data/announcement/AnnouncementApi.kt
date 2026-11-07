@@ -32,13 +32,16 @@ import java.net.URLEncoder
  */
 object AnnouncementApi {
 
-    private var settings: com.yunx.app.data.prefs.SettingsRepository? = null
     private var cachePrefs: android.content.SharedPreferences? = null
     private val feedMutex = kotlinx.coroutines.sync.Mutex()
-    val baseUrl: String get() = AnnouncementSource.effective(settings?.announcementBaseUrl.orEmpty())
+    /**
+     * 公告来源固定为官方 COS 直链（2026-11-07 起）。
+     * 原「设置 → 公告来源」自定义入口已删除：那个开关对普通用户没有任何意义，
+     * 只在填错时把公告整块打死，且出错后界面上没有任何提示。
+     */
+    val baseUrl: String get() = AnnouncementSource.OFFICIAL_URL
     val isConfigured: Boolean get() = true
     fun install(context: android.content.Context) {
-        settings = com.yunx.app.data.prefs.SettingsRepository(context.applicationContext)
         cachePrefs = context.applicationContext.getSharedPreferences("announcement_cache", android.content.Context.MODE_PRIVATE)
     }
 
