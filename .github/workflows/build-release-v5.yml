@@ -223,11 +223,28 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: |
-          gh release create "$RELEASE_TAG" \
-            output/*.apk \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
-            --title "星辰助手 $RELEASE_TAG" \
-            --generate-notes
+          # 手写更新日志优先：docs/release-notes/<tag>.md 存在就用它，
+          # 否则退回自动生成的 commit 列表。
+          NOTES_FILE="docs/release-notes/${RELEASE_TAG}.md"
+
+          if [ -f "$NOTES_FILE" ]; then
+            echo "Using hand-written notes: $NOTES_FILE"
+
+            gh release create "$RELEASE_TAG" \
+              output/*.apk \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "星辰助手 $RELEASE_TAG" \
+              --notes-file "$NOTES_FILE"
+          else
+            echo "No notes file for $RELEASE_TAG, falling back to generated notes"
+
+            gh release create "$RELEASE_TAG" \
+              output/*.apk \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "星辰助手 $RELEASE_TAG" \
+              --generate-notes
+          fi
 
           echo "Published 星辰助手 $RELEASE_TAG"
