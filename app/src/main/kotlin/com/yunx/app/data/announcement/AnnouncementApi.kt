@@ -40,7 +40,6 @@ object AnnouncementApi {
      * 只在填错时把公告整块打死，且出错后界面上没有任何提示。
      */
     val baseUrl: String get() = AnnouncementSource.OFFICIAL_URL
-    val isConfigured: Boolean get() = true
     fun install(context: android.content.Context) {
         cachePrefs = context.applicationContext.getSharedPreferences("announcement_cache", android.content.Context.MODE_PRIVATE)
     }
@@ -222,7 +221,6 @@ object AnnouncementApi {
     /** 发 GET 请求并解析统一响应结构；所有失败路径都返回 [Result.Failure]（不抛异常） */
     private suspend fun <T> request(path: String, fromData: (JSONObject) -> T): Result<T> =
         withContext(Dispatchers.IO) {
-            if (!isConfigured) return@withContext Result.Failure("尚未配置公告来源")
             val url = baseUrl + path
             val body = try {
                 val call = Request.Builder()

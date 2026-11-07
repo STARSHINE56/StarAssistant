@@ -105,7 +105,6 @@ import com.yunx.app.ui.viewmodel.LanzouAccountViewModel
 import com.yunx.app.ui.viewmodel.LanzouCloudViewModel
 import com.yunx.app.ui.viewmodel.Pan115AccountViewModel
 import com.yunx.app.ui.viewmodel.Pan115CloudViewModel
-import com.yunx.app.data.announcement.AnnouncementApi
 import com.yunx.app.data.network.GitHubLinkType
 import com.yunx.app.data.db.AppDatabase
 import com.yunx.app.data.db.DownloadTaskEntity
@@ -1035,13 +1034,12 @@ fun MainScreen(
                 )
             },
             actions = {
-                if (AnnouncementApi.isConfigured) {
-                    IconButton(onClick = { announcementDetailId = null; showAnnouncements = true }) {
-                        androidx.compose.material3.BadgedBox(badge = {
-                            if (unreadAnnouncementCount > 0) androidx.compose.material3.Badge { Text(unreadAnnouncementCount.toString()) }
-                        }) {
-                            Icon(Icons.Outlined.Campaign, contentDescription = "公告（$unreadAnnouncementCount 条未读）")
-                        }
+                // 公告源固定为官方 COS，永远可用，这里不再做「是否配置」判断。
+                IconButton(onClick = { announcementDetailId = null; showAnnouncements = true }) {
+                    androidx.compose.material3.BadgedBox(badge = {
+                        if (unreadAnnouncementCount > 0) androidx.compose.material3.Badge { Text(unreadAnnouncementCount.toString()) }
+                    }) {
+                        Icon(Icons.Outlined.Campaign, contentDescription = "公告（$unreadAnnouncementCount 条未读）")
                     }
                 }
                 // 顶部栏只展示与当前页面直接相关的入口，避免解析页按钮过多。
