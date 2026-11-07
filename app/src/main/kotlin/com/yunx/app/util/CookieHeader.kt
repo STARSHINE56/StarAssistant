@@ -54,7 +54,9 @@ object CookieHeader {
                 if (trimmed.isEmpty()) return@forEach
                 val name = trimmed.substringBefore('=').trim()
                 if (name.isBlank()) return@forEach
-                merged.putIfAbsent(name, trimmed)
+                // ★ 不用 putIfAbsent：Map.putIfAbsent 是 API 24 才有的默认方法，
+                //   本项目 minSdk=23，在 Android 6.0 上会 NoSuchMethodError 崩溃（Android Lint NewApi 报错）。
+                if (!merged.containsKey(name)) merged[name] = trimmed
             }
         }
         return merged.values.joinToString("; ")
