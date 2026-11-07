@@ -41,7 +41,6 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import com.yunx.app.data.network.HttpClients
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -58,7 +57,6 @@ import java.util.concurrent.atomic.AtomicLong
 import org.json.JSONArray
 import org.json.JSONObject
 import okhttp3.Headers
-import okhttp3.Request
 import kotlin.coroutines.coroutineContext
 import kotlin.math.min
 
