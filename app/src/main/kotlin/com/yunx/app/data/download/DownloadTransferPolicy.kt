@@ -96,9 +96,14 @@ internal class AdaptiveConnections(val maximum: Int, private val clock: () -> Lo
         try { return block() } finally { synchronized(this) { active-- } }
     }
     @Synchronized fun congested(waitMillis: Long = 1000) {
-        limit = maxOf(1, limit / 2)
+        // ★ 下限抬到 2 路、冻结期 30s→15s（2026-11-07）：
+        //   弱网/风控期里每一次网络异常都会调到这里，旧实现 `maxOf(1, limit / 2)` 会一路压到 1 路，
+        //   而每次探测失败又把 freezeUntil 重置成「现在 + 30s」——于是整个下载永久停在单连接龟速、
+        //   且再也爬不回来。用户看到的就是「大文件根本下不动」。2 路已足够把风控压力压到最低，
+        //   同时保住「减半 → 探测翻倍」的恢复路径。
+        limit = minOf(maximum, maxOf(2, limit / 2))
         until = maxOf(until, clock() + waitMillis.coerceIn(250, 120_000))
-        freezeUntil = until + 30_000
+        freezeUntil = until + 15_000
         baseline = 0
         probing = false
     }

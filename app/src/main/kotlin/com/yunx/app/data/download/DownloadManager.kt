@@ -1988,9 +1988,46 @@ class DownloadManager(
         }
         persistProgressIfDue(id, downloaded.get(), total, true, lastPersistAt)
         val files = finalChunkFiles(chunkDir, mainPoolCount)
-        check(files.sumOf { it.length() } == total) { "文件大小校验失败，拒绝合并" }
+        val actualBytes = files.sumOf { it.length() }
+        if (actualBytes != total) {
+            // ★ 自愈兜底（2026-11-07）：长度对不上时先把「超过自身区间」的分片删掉再抛错。
+            //   旧实现直接 `check` 抛错，而补传阶段只挑 `length < size` 的片 —— 超长片永远没人处理，
+            //   于是任务会在「文件大小校验失败」上无限重试，用户只能删任务重来。
+            //   超长片的内容必然错位（写入越过区间），只能删掉重下，不能截断后当有效数据用。
+            var healed = 0
+            files.forEach { f ->
+                val want = expectedPartLength(f, mainPoolCount, chunkSize, total)
+                if (want != null && f.length() > want && f.delete()) healed++
+            }
+            throw IOException(
+                "文件大小校验失败（已下载 $actualBytes / 应为 $total" +
+                    (if (healed > 0) "，已清理 $healed 个超长分片，下次重试会重新下载" else "") + "）"
+            )
+        }
         finishDownload(id, chunkDir, files, task.fileName, total)
     }
+
+    /**
+     * 单片预期长度：`part_i` 按 plan 的 chunkSize 切（最后一片可能不足），
+     * `seg_{start}_{end}.part` 由文件名里的区间决定。文件名不可解析时返回 null。
+     *
+     * 只用于合并前的自愈判断（找出「长度超出自身区间」的脏分片），不在下载热路径上。
+     */
+    private fun expectedPartLength(file: File, mainPoolCount: Int, chunkSize: Long, total: Long): Long? =
+        when {
+            file.name.startsWith("part_") -> {
+                val index = file.name.removePrefix("part_").toIntOrNull()
+                if (index == null || index !in 0 until mainPoolCount) null
+                else (total - index.toLong() * chunkSize).coerceIn(0L, chunkSize)
+            }
+            file.name.startsWith("seg_") && file.name.endsWith(".part") -> {
+                val body = file.name.removePrefix("seg_").removeSuffix(".part")
+                val s = body.substringBefore('_').toLongOrNull()
+                val e = body.substringAfter('_', "").toLongOrNull()
+                if (s == null || e == null || e < s) null else e - s + 1
+            }
+            else -> null
+        }
 
     /** 最终合并文件列表：主池 part_0..part_{n-1}（连续前半段）+ 弹性区 seg_{start}_{end} 按 start 排序（后半段） */
     private fun finalChunkFiles(chunkDir: File, mainPoolCount: Int): List<File> {

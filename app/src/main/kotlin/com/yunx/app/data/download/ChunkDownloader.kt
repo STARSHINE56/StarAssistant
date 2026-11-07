@@ -33,6 +33,20 @@ private const val CHUNK_RETRIES = 3
 /** 当服务器忽略 Range（返回 200 整文件）时，对单分片重试 Range 的次数（指数退避后重发，CDN 负载下降后常能拿到 206） */
 private const val RANGE_RETRIES = 4
 /**
+ * 写入不足（CDN 提前关流）后「立刻从断点续传」的最大连续次数。
+ * 这类续传不消耗 [CHUNK_RETRIES]，但必须有硬上限：防止服务端每轮只吐几个字节时无限循环。
+ */
+private const val SHORT_SLICE_REISSUE_LIMIT = 8
+/** 超长分片（历史脏数据/上次写到区间外）截断重下的最大次数 */
+private const val TRUNCATE_HEAL_LIMIT = 3
+/**
+ * 慢连接抢占后「换连接续传」的最大连续次数。
+ * 抢占本身不消耗 [CHUNK_RETRIES]（它不代表失败），但必须留一个硬上限：
+ * 外层若持续置位抢占标志、而每次新连接都在 0 字节处被掐断，没有上限就会空转。
+ * 外层自身的 PREEMPT_MAX 只有 3，这里的 16 只做兜底。
+ */
+private const val PREEMPT_REISSUE_LIMIT = 16
+/**
  * 网络读缓冲：64KB。
  * 原为 256KB —— 每一路在飞分片各持一份，是「Java 堆被撑满」的主要来源之一
  * （在飞路数上限见 DownloadManager.MAX_INFLIGHT_CHUNKS）。
@@ -75,6 +89,18 @@ internal data class ResourceMetadata(val total: Long?, val etag: String, val las
  * 语义是「换连接」而不是「失败」，因此不退避、不判写入不足，也不改变 ChunkResult 的对外三态。
  */
 private class PreemptedException : IOException("慢连接抢占")
+
+/**
+ * ★ 分片写入不足，但**已写字节全部有效并已落盘**（最常来自 CDN 提前结束响应流：
+ * Content-Range 声明 N 字节，实际只吐出 M<N 就 EOF）。
+ *
+ * 语义是「换个连接接着写」而不是「失败」：下载循环收到它就从 `partFile.length()` 立刻续传，
+ * 既不放空洞（不足的片绝不返回 OK），也不把已经写进去的 M 字节白扔。
+ * 旧实现把它直接判成 [ChunkResult.FAILED]，上层只补传一轮就整任务失败——
+ * 大文件分片多、连接更容易被中途掐断，于是表现为「大量丢片、反复重试下不来」。
+ */
+private class ShortSliceException(val written: Long, val expected: Long) :
+    IOException("分片写入不足 written=$written 预期=$expected")
 
 /**
  * OkHttp 分片下载器：
@@ -180,7 +206,9 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
      * - 瞬时 IO 异常：指数退避重试（CHUNK_RETRIES）；
      * - 服务器忽略 Range（RANGE_IGNORED）：退避后重发 Range 至多 RANGE_RETRIES 次，仍被忽略则返回
      *   RANGE_IGNORED 交由 DownloadManager 回退单流整文件（**全程不下载整文件**）；
-     * - 写入后校验「已写字节 == 预期字节」，不足按失败处理（避免空洞文件 = 损坏）；
+     * - 写入后校验「已写字节 == 预期字节」，**不足时立刻从断点续传**（已写字节有效，
+     *   见 [ShortSliceException]），连续多次仍不足才判失败（避免空洞文件 = 损坏）；
+     * - 超长分片（历史脏数据）先截断重下，不直接把整片判死（否则合并校验永远不过）；
      * - 慢连接抢占（[preempt]）：置位即断开当前连接、保留已写字节，立刻换新连接续传（见 [PreemptedException]）。
      */
     suspend fun downloadChunk(
@@ -205,18 +233,44 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
         chunkKey: String = "",
         onBytes: suspend (Long) -> Unit
     ): ChunkResult = withContext(DownloadManager.chunkIoDispatcher) {
-        val attempts = CHUNK_RETRIES + RANGE_RETRIES
-        repeat(attempts) { attempt ->
+        // ★ 重试计数口径（2026-11-07 重做）：
+        //   旧实现 `repeat(CHUNK_RETRIES + RANGE_RETRIES)` 把「慢连接抢占」也算一次尝试。
+        //   弱网下 3 次抢占 + 4 次真实异常就把额度烧光 → 分片判死 → 上层只补传一轮 → 整任务失败重来，
+        //   用户侧看到的就是「大文件反复丢片、根本下不下来」。
+        //   现在只有「真实失败」（超时/断连/非 2xx/结构性错误）消耗额度；抢占与
+        //   「写入不足后立刻续传」各自独立计数（都有硬上限，防死循环），不占额度。
+        val maxAttempts = CHUNK_RETRIES + RANGE_RETRIES
+        var attempt = 0
+        var shortReissues = 0
+        var truncateHeals = 0
+        var preemptReissues = 0
+        while (attempt < maxAttempts) {
             if (!isActive) throw CancellationException("下载被取消")
             val existing = partFile.length()
-            val from = start + existing
             val unknownTotal = end == Long.MAX_VALUE
             val expected = if (unknownTotal) -1L else end - start + 1
+            // ★ 超长分片自愈：旧实现直接 FAILED，而补传的筛选条件是 `length < size`，
+            //   永远跳过超长片 → 合并前 `sum == total` 必然不成立 → 任务卡在
+            //   「文件大小校验失败」上无限重试（删任务才恢复）。这里截断重下。
+            if (!unknownTotal && existing > expected) {
+                if (truncateHeals++ >= TRUNCATE_HEAL_LIMIT) {
+                    Log.w(TAG, "downloadChunk: task=$taskId 分片反复超长（已收 $existing > 预期 $expected），放弃该片")
+                    return@withContext ChunkResult.FAILED
+                }
+                Log.w(TAG, "downloadChunk: task=$taskId 分片超长（已收 $existing > 预期 $expected），截断重下")
+                runCatching { RandomAccessFile(partFile, "rw").use { it.setLength(0) } }
+                if (partFile.length() > 0L) {
+                    Log.w(TAG, "downloadChunk: task=$taskId 分片截断失败，按失败处理")
+                    return@withContext ChunkResult.FAILED
+                }
+                continue
+            }
             // 分片已完整（含断点续传）：直接成功
-            if (!unknownTotal && existing > expected) return@withContext ChunkResult.FAILED
             if (!unknownTotal && existing == expected) return@withContext ChunkResult.OK
 
+            val from = start + existing
             var preempted = false
+            var shortSlice = false
             val res = try {
                 doChunkAttempt(
                     taskId, url, from, end, unknownTotal, partFile, headers, chunkKey,
@@ -229,6 +283,12 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
                 preempt?.set(false)
                 preempted = true
                 Log.w(TAG, "downloadChunk: task=$taskId 慢连接被抢占，换连接续传（已收 ${partFile.length()} 字节）")
+                null
+            } catch (e: ShortSliceException) {
+                // ★ CDN 提前关流：已写字节全部有效，立刻从 partFile.length() 续传（不判死、不退避）
+                shortSlice = true
+                Log.w(TAG, "downloadChunk: task=$taskId 分片写入不足 written=${e.written} 预期=${e.expected}，" +
+                    "从 ${partFile.length()} 字节续传（连续第 ${shortReissues + 1}/$SHORT_SLICE_REISSUE_LIMIT 次）")
                 null
             } catch (e: SourceChangedException) {
                 throw e
@@ -260,12 +320,32 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
                     return@withContext ChunkResult.RANGE_IGNORED
                 }
                 null -> {
-                    // 抢占属于「换连接」，绝不等退避；只有真实 IO 异常才退避
-                    // ★ 加抖动（2026-10-25）：确定性退避下，几十路分片同时因网络抖动失败时
-                    //   会在同一毫秒集体重试，人为制造流量尖峰——正是最容易触发服务端风控的模式。
-                    if (!preempted && attempt < attempts - 1) {
-                        val base = (500L * (attempt + 1)).coerceAtMost(3000)
-                        delay(base / 2 + Random.nextLong(base / 2 + 1))
+                    when {
+                        // 抢占属于「换连接」：零退避、不消耗重试额度（但有独立硬上限防空转）
+                        preempted -> {
+                            if (++preemptReissues >= PREEMPT_REISSUE_LIMIT) {
+                                Log.w(TAG, "downloadChunk: task=$taskId 连续抢占 $preemptReissues 次仍未推进，按失败处理")
+                                return@withContext ChunkResult.FAILED
+                            }
+                        }
+                        // 短写属于「服务端截断但数据有效」：零退避立刻续传，连续太多次才判死
+                        // （每轮都退避反而把在飞路数拖成集体停顿，旧实现"900KB 忽快忽慢"就是这个）
+                        shortSlice -> {
+                            if (++shortReissues >= SHORT_SLICE_REISSUE_LIMIT) {
+                                Log.w(TAG, "downloadChunk: task=$taskId 连续短写 $shortReissues 次仍不足，按失败处理")
+                                return@withContext ChunkResult.FAILED
+                            }
+                        }
+                        // 真实失败：消耗一次额度并指数退避
+                        // ★ 加抖动（2026-10-25）：确定性退避下，几十路分片同时因网络抖动失败时
+                        //   会在同一毫秒集体重试，人为制造流量尖峰——正是最容易触发服务端风控的模式。
+                        else -> {
+                            attempt++
+                            if (attempt < maxAttempts) {
+                                val base = (500L * attempt).coerceAtMost(3000)
+                                delay(base / 2 + Random.nextLong(base / 2 + 1))
+                            }
+                        }
                     }
                 }
             }
@@ -351,11 +431,10 @@ class ChunkDownloader(private val clientProvider: () -> OkHttpClient) {
                         val written = writeSlice(body.byteStream(), partFile, existing, expected, preempt, contentDigest, onBytes)
                         // ★ 慢连接抢占：主动断开、保留已写字节（否则会被下面的「写入不足」误判为失败丢片）
                         if (preempt?.get() == true) throw PreemptedException()
-                        // ★ 校验：206 也必须写满预期字节，否则视为失败（防空洞/损坏）
-                        if (written != expected) {
-                            Log.w(TAG, "downloadChunk: task=$taskId 分片写入不足 written=$written 预期=$expected")
-                            return@use ChunkResult.FAILED
-                        }
+                        // ★ 校验：206 也必须写满预期字节，否则绝不返回 OK（防空洞/损坏）。
+                        //   但「不足」不等于「失败」：已写字节有效且已落盘，抛 [ShortSliceException]
+                        //   让下载循环从 partFile.length() 立刻续传，而不是把整片丢弃重来。
+                        if (written < expected) throw ShortSliceException(written, expected)
                         ChunkResult.OK
                     }
                     200 -> {

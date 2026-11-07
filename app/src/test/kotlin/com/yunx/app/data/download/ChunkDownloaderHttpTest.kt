@@ -88,9 +88,18 @@ class ChunkDownloaderHttpTest {
         assertEquals("\"version\"", metadata.etag)
         assertEquals("bytes=0-0", s.takeRequest().getHeader("Range"))
     }
-    @Test fun rejectsOversizedExistingPartWithoutClaimingComplete() = withDownload { s, d, f ->
+    /**
+     * ★ 行为变更（2026-11-07）：超长分片不再「直接判死」。
+     * 旧实现返回 FAILED，而补传只挑 `length < size` 的片 → 超长片永远没人处理 →
+     * 合并前 `sum == total` 必然不成立 → 任务卡在「文件大小校验失败」上无限重试。
+     * 现在先截断归零再从 0 重下这一片（内容必错位，不能截断后当有效数据用）。
+     */
+    @Test fun oversizedExistingPartIsTruncatedAndReDownloaded() = withDownload { s, d, f ->
         f.writeText("toolong")
-        assertEquals(ChunkResult.FAILED, d.downloadChunk(1, s.url("/file").toString(), 0, 2, f, emptyMap()) {})
+        s.enqueue(MockResponse().setResponseCode(206).setHeader("Content-Range", "bytes 0-2/3").setBody("abc"))
+        assertEquals(ChunkResult.OK, d.downloadChunk(1, s.url("/file").toString(), 0, 2, f, emptyMap()) {})
+        assertEquals("bytes=0-2", s.takeRequest().getHeader("Range"))
+        assertEquals("abc", f.readText())
     }
     @Test fun rangeIgnoredFallsBackWithoutWritingFullResponseToPart() = withDownload { s, d, f ->
         s.enqueue(MockResponse().setBody("abcdef"))
