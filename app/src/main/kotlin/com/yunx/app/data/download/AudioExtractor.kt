@@ -130,7 +130,13 @@ object AudioExtractor {
             track.format.getLong(MediaFormat.KEY_DURATION)
         }.getOrDefault(0L)
         var capacity = runCatching {
-            track.format.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 2 * 1024 * 1024)
+            // MediaFormat.getInteger(key, default) 这个重载是 API 29 才有的，本模块 minSdk = 23，
+            // 直接调在 7.x/8.x 上会 NoSuchMethodError，所以用「先 containsKey 再单参 getInteger」等价写法。
+            if (track.format.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE)) {
+                track.format.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE)
+            } else {
+                2 * 1024 * 1024
+            }
         }.getOrDefault(2 * 1024 * 1024)
         var buffer = ByteBuffer.allocate(capacity)
         var lastPercent = -1
