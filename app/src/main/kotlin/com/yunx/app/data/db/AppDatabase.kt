@@ -6,13 +6,14 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
-import com.yunx.app.data.security.AndroidKeystoreCredentialCipher
 import com.yunx.app.data.security.CredentialCipher
 import com.yunx.app.data.security.CredentialStore
+import com.yunx.app.data.security.PlaintextCredentialCipher
+import com.yunx.app.util.DiagnosticLog
 
 @Database(
     entities = [QuarkAccountEntity::class, DownloadTaskEntity::class, UCAccountEntity::class, XunleiAccountEntity::class, BaiduAccountEntity::class, C139AccountEntity::class, Pan123AccountEntity::class, Pan115AccountEntity::class, GuangYaAccountEntity::class, ILanzouAccountEntity::class, LanzouAccountEntity::class, BookmarkEntity::class, VideoAccountEntity::class],
-    version = 23,
+    version = 24,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -41,7 +42,7 @@ abstract class AppDatabase : RoomDatabase() {
 
     abstract fun bookmarkDao(): BookmarkDao
 
-    /** 视频解析账号：原始 DAO（未加密），对外请用 [videoAccountDao] */
+    /** 视频解析账号：原始 DAO（未解密包装），对外请用 [videoAccountDao] */
     abstract fun rawVideoAccountDao(): VideoAccountDao
 
     private lateinit var credentialCipher: CredentialCipher
@@ -58,7 +59,7 @@ abstract class AppDatabase : RoomDatabase() {
     fun ilanzouAccountDao(): ILanzouAccountDao = SecureAccountDaos.ilanzou(rawILanzouAccountDao(), credentialCipher)
     fun lanzouAccountDao(): LanzouAccountDao = SecureAccountDaos.lanzou(rawLanzouAccountDao(), credentialCipher)
 
-    /** 视频解析账号：Cookie 与网盘凭证同等加密后落库 */
+    /** 视频解析账号：与网盘凭证同一套读写口径（明文落库 + 旧密文兼容读取） */
     fun videoAccountDao(): VideoAccountDao = SecureAccountDaos.videoAccount(rawVideoAccountDao(), credentialCipher)
 
     companion object {
@@ -86,13 +87,22 @@ abstract class AppDatabase : RoomDatabase() {
                         MIGRATION_19_20,
                         MIGRATION_20_21,
                         MIGRATION_21_22,
-                        MIGRATION_22_23
+                        MIGRATION_22_23,
+                        MIGRATION_23_24
                     )
                     // 早期开发版（1-8）无可靠 schema；从 v9 起必须保留凭证和下载任务
                     .fallbackToDestructiveMigrationFrom(1, 2, 3, 4, 5, 6, 7, 8)
                     .build()
                     .also { database ->
-                        database.credentialCipher = AndroidKeystoreCredentialCipher.shared
+                        // 凭证不再加密：写入直通，读取时兼容旧 Keystore 密文并明文回写
+                        // （旧密文由 PlaintextCredentialCipher 用只读的旧密钥解一次，
+                        //   调用方随后明文回写覆盖；绝不 generateKey / deleteEntry）
+                        database.credentialCipher = PlaintextCredentialCipher.shared
+                        // 只**记录** application context，供数据层 markKeyLost() 用，不删任何数据：
+                        // 各存储路径自己按「解密失败 → 保留原数据」自愈（DAO 的 decryptGuarded、
+                        // GitHubTokenStore.getToken、DownloadManager.loadPersistedHeaders），
+                        // 在这里无差别清空账号表风险太大——判断稍有偏差就会白白抹掉用户的登录态。
+                        // 主装配点在 XingChenApp.onCreate（必须早于任何凭证读写），这里再兜一次。
                         CredentialStore.installRecovery(context)
                         instance = database
                     }
@@ -258,6 +268,19 @@ abstract class AppDatabase : RoomDatabase() {
         private val MIGRATION_22_23 = object : Migration(22, 23) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE `download_task` ADD COLUMN `motionUrl` TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
+        /**
+         * v24：「仅下载音频」。
+         *
+         * 任务要多记一个「下完抽音轨」的标记（见 `AudioExtractor`）—— 放在任务表而不是解析结果里，
+         * 是因为抽音轨发生在**下载完成时**，暂停/重启后仍要按这个标记收尾。默认 0 = 普通下载，
+         * 升级后既有任务的行为完全不变。
+         */
+        private val MIGRATION_23_24 = object : Migration(23, 24) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `download_task` ADD COLUMN `audioOnly` INTEGER NOT NULL DEFAULT 0")
             }
         }
     }

@@ -28,6 +28,16 @@ object AppLinks {
     /** QQ 交流群号：星辰助手暂不设群，留空以隐藏入口 */
     const val QQ_GROUP = ""
 
+    /**
+     * GitHub 个人访问令牌（classic）创建页，带 `scopes` 与 `description` 预填。
+     *
+     * ★ 为什么不用列表页 `https://github.com/settings/tokens`：登录后还要再点一次「Generate new token」，
+     *   手机上翻 GitHub 设置的成本比电脑高，直接把权限和备注填好省两步。
+     * ★ `scopes=public_repo` 必须与 Token 弹窗里「勾选 public_repo」那句话保持一致，
+     *   两边不一致会让人按文字去补勾权限。
+     */
+    const val GITHUB_TOKEN_PAGE = "https://github.com/settings/tokens/new?scopes=public_repo&description=StarAssistant"
+
     /** 打开源码仓库（交给系统浏览器；没有可用浏览器时返回 false） */
     fun openRepo(context: Context): Boolean = runCatching {
         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(GITHUB_REPO)))
@@ -47,4 +57,15 @@ object AppLinks {
     /** 用于拉起 QQ 群卡片的 scheme（mqqapi://card/show_pslcard?src_type=internal&uin=<群号>） */
     fun qqGroupScheme(): String =
         "mqqapi://card/show_pslcard?src_type=internal&version=1&uin=$QQ_GROUP&card_type=group&source=qrcode"
+
+    /**
+     * 用系统默认浏览器打开 [GITHUB_TOKEN_PAGE]；返回 false 表示这台设备上没有应用能处理 https。
+     *
+     * ★ 与 [openQQGroup] 同一口径：不做 `resolveActivity()` 预检（Android 11+ 包可见性会把
+     *   「装了浏览器」误判成「没装」），失败交给调用方退化成复制链接。
+     */
+    fun openGitHubTokenPage(context: Context): Boolean {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(GITHUB_TOKEN_PAGE))
+        return runCatching { context.startActivity(intent) }.isSuccess
+    }
 }

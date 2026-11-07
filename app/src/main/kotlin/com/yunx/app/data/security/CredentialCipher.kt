@@ -1,24 +1,23 @@
 package com.yunx.app.data.security
 
 import android.content.Context
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
 import android.util.Base64
-import android.util.Log
 import com.yunx.app.util.DiagnosticLog
 import java.security.KeyStore
-import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
-import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
  * 本机密钥不可用的两种口径。
  *
- * ★ 上层**必须区分**这两种（[CredentialStore.isKeyLost]）：[PermanentlyInvalid] 代表密文
- *   永远解不开了、该清就清；[Unavailable] 只是**此刻**拿不到键，清数据会把用户本来还能读的
- *   账号白白废掉。1.2.8 的崩溃就是因为这两种都没被区分，裸 Keystore 异常直接击穿了主线程。
+ * ★ 上层**必须区分**这两种（见 [CredentialStore.isKeyLost]）：[PermanentlyInvalid] 代表密文
+ *   永远解不开了；[Unavailable] 只是**此刻**拿不到键，按「丢数据」处理会把用户本来还能读的
+ *   账号白白废掉。
+ *
+ * ★ 上游 v1.3.1 / #208 起凭证改为**明文存储**，本类型不再由写入路径抛出；保留它是因为
+ *   迁移期仍有「旧 `yunx:v1:` 密文读不出来」这条路径，数据层（`SecureAccountDaos` /
+ *   `DownloadManager` / `GitHubTokenStore`）与界面层需要**一套统一**的故障判定口径。
  */
 internal sealed class CredentialKeyException(
     message: String,
@@ -28,15 +27,17 @@ internal sealed class CredentialKeyException(
     /**
      * Keystore 里的条目**永久不可用**：查无此键（`Key not found`）/ 密钥 blob 无法解密
      * （`Invalid key blob`）/ 被系统永久作废（`KeyPermanentlyInvalidatedException`，典型诱因是
-     * **用户改了锁屏密码或指纹**、OEM 的 keystore 升级，以及部分机型的 keyblob 升级路径）。
-     * 记录本身已经坏了，只能用**新密钥**重新开始。
+     * **用户改了锁屏密码或指纹**、OEM 的 keystore 升级）。
+     *
+     * 迁移期含义：磁盘上那条旧密文**永远**解不开了（旧密钥已经不在），只能让用户重新登录；
+     * 但**不要**删数据 —— 备份导入 / 换机后仍可能救回来。
      */
     class PermanentlyInvalid(reason: String, cause: Throwable? = null) :
         CredentialKeyException("本机密钥不可用：$reason", cause)
 
     /**
      * Keystore 条目**本身完好，只是暂时取不到**：设备还处于「直接启动」未解锁状态等。
-     * 此时**绝不能**删键重建，否则会把本来还能读的密文全部作废（误伤用户账号）。
+     * 此时**绝不能**按「读不出来」清数据，下次读取（或设备解锁后）就能恢复。
      */
     class Unavailable(reason: String, cause: Throwable? = null) :
         CredentialKeyException("本机密钥暂时不可用：$reason", cause)
@@ -47,6 +48,12 @@ internal sealed class CredentialKeyException(
  *
  * 抽成独立对象是因为判定异常的地方不止加解密本身（还有各 DAO 的兜底），
  * 而通知必须**跨层**（数据层失钥 → UI 层告知用户），这里用一次性标记 + 启动时补发的方式解耦。
+ *
+ * ★ 合并说明（上游 #208 明文改造）：写入不再经过 Keystore，**不会**再有「密钥被重建」这件事，
+ *   所以 [installRecovery] 不再挂 `onKeyProvisioned` 监听，只记录 application context；
+ *   其余成员（[isKeyLost] / [markKeyLost] / [hasKeyLostNotice] / [consumeKeyLostNotice] /
+ *   [LOST_TITLE] / [LOST_MESSAGE]）保持星辰既有签名不变 —— `XingChenApp`、`MainScreen`、
+ *   `DownloadManager` 仍在调用，删掉会直接编不过。
  */
 object CredentialStore {
 
@@ -71,7 +78,7 @@ object CredentialStore {
     /**
      * 该异常是否代表**这条凭证已经彻底读不回来了**（密钥条目永久失效）。
      *
-     * ★ 只有它为 true 时才允许删数据：`Unavailable`（Keystore 暂时进不去）时删掉等于
+     * ★ 只有它为 true 时才允许清数据：`Unavailable`（Keystore 暂时进不去）时清掉等于
      *   把用户本来还能解开的账号白白作废，下次设备解锁后就没有了。
      */
     internal fun isKeyLost(error: Throwable): Boolean =
@@ -114,96 +121,65 @@ object CredentialStore {
     }
 
     /**
-     * 装配「密钥被重建 → 记一次性提示」的监听。
+     * 装配数据层的 application context（`YunXApp.onCreate` / `AppDatabase` 装配时调用）。
      *
-     * ★ 必须在**任何**凭证读写之前调用（`YunXApp.onCreate` 里就调一次），否则密钥在监听注册
-     *   之前就被重建，那一轮的提示就丢了。重复调用只是覆盖同一个回调，幂等。
+     * ★ 明文改造后没有「密钥被重建」这回事，所以这里不再注册任何监听：重复调用只是覆盖
+     *   同一个 context 引用，幂等。签名保持星辰原样，调用点无需改动。
      */
     fun installRecovery(context: Context) {
-        val app = context.applicationContext
-        appContext = app
-        AndroidKeystoreCredentialCipher.shared.onKeyProvisioned { markKeyLost(app) }
+        appContext = context.applicationContext
     }
 }
 
+/**
+ * 凭证读写的统一入口。
+ *
+ * ★ 2026-10 起凭证**不再加密**：Android Keystore 的字段级加密带来过真实事故
+ *   （改锁屏密码 / 指纹会让密钥被系统永久作废，历史上还因误判「条目损坏」删掉好密钥，
+ *   导致六家网盘账号当场全丢），收益与代价不成比例，因此改为明文存储。
+ */
 internal interface CredentialCipher {
     fun encrypt(plaintext: String, purpose: String): String
     fun decrypt(stored: String, purpose: String): String
     fun isEncrypted(stored: String): Boolean
 
     /**
-     * 注册「密钥是**新建的**」监听：只在本机密钥由 `generateKey()` 现造出来时回调一次
-     * （正常读出来的旧密钥不回调）。
+     * 注册「密钥是**新建的**」监听 —— 明文实现下**没有密钥可建**，因此永远不会回调。
      *
-     * ★ 判断依据只能是「新建」而不是「失败过」：`load(null)` 拿不到键时可能是条目坏了，
-     *   也可能只是还没生成过（首次启动）。只有真的新建了密钥，才能断定
-     *   **此前的密文必然由另一把密钥加密**、已经读不回来，才该去清残留。
+     * ★ 仅作为兼容保留：星辰侧的历史调用约定里有这个方法，留一个默认空实现，
+     *   免得任何一处旧调用点（以及后续同步上游时的注释引用）编译不过。
      */
-    fun onKeyProvisioned(listener: () -> Unit)
+    fun onKeyProvisioned(listener: () -> Unit) {
+        // no-op：明文存储不涉及 Keystore 密钥的生成与替换
+    }
 }
 
 /**
- * AES-GCM envelope encryption whose non-exportable key is held by Android Keystore.
+ * 明文实现：写入直通、读取兼容历史密文。
  *
- * 性能优化：密钥首次从 Keystore 加载后缓存复用（AndroidKeyStore 每次 KeyStore.load+getKey
- * 都是 Binder IPC，缓存后避免每次解密/加密都重复走 IPC）。
+ * ★ 写入：原样返回，不再做任何加密。
+ * ★ 读取：若读到的是旧版本留下的 `yunx:v1:` 密文，用**旧 Keystore 密钥**解一次，
+ *   调用方拿到明文后会以明文回写覆盖（见 `SecureAccountDaos` / `DownloadManager` /
+ *   `GitHubTokenStore`），老用户无需重新登录即可平滑过渡。
+ * ★ 这条旧密钥路径**只读**：绝不 `generateKey()`、绝不 `deleteEntry()` —— 任何「自愈/重建」
+ *   都可能把用户还能读的凭证永久作废，那正是本次改动要根除的行为。
  *
- * ★ 密钥失效自愈（v1.2.9）：旧实现在密钥不可用时**直接把 Keystore 异常抛出去**，于是
- *   「用户改了锁屏密码」这类事件会让 App 在主线程上崩掉（1.2.8 收到三种崩溃报告：
- *   `InvalidKeyException: Keystore operation failed`、`KeyPermanentlyInvalidatedException`、
- *   `KeyStoreException: Invalid key blob`）。现在按三级处理：
- *
- *   1. **条目坏了**（查无此键 / blob 解不开 / 被系统作废）：删掉坏条目 → 生成新密钥 →
- *      **同一段加解密流程重试一次**（GCM 的 iv / AAD / 密文都还在，重建 Cipher 即可，
- *      不需要调用方参与）；
- *   2. **条目只是暂时取不到**（如未解锁的直接启动）：抛
- *      [CredentialKeyException.Unavailable]，**绝不删键**——否则会误伤本来还能读的密文；
- *   3. 重试仍失败：抛 [CredentialKeyException.PermanentlyInvalid]，由数据层清残留 + 提示重登。
- *
- * ★ 为什么必须删了重建：`KeyPermanentlyInvalidatedException` 意味着这条 keyblob 再也解不开，
- *   留着它只会让**每一次**读写都失败（每个平台各自失败一遍）。换新密钥后，新写入的凭证
- *   立即恢复正常，用户只需重登一次。
+ * ★ 星辰侧兼容（本分支合并要点）：星辰 1.2.x 用的就是同一条旧路径 ——
+ *   别名 `yunx.account.credentials.v1`、`AES/GCM/NoPadding`、AAD = `purpose`、
+ *   `yunx:v1:<base64(iv)>:<base64(ciphertext)>`。参数完全一致，因此星辰已存的加密凭证
+ *   也能被这里原样解开、随后由调用方明文回写，**不需要**再保留一份「加密写入」的实现。
  */
-internal class AndroidKeystoreCredentialCipher : CredentialCipher {
+internal class PlaintextCredentialCipher : CredentialCipher {
 
-    @Volatile
-    private var cachedKey: SecretKey? = null
+    override fun encrypt(plaintext: String, purpose: String): String = plaintext
 
-    @Volatile
-    private var provisionedListener: (() -> Unit)? = null
-
-    @Volatile private var staleEntryDiscarded = false
-
-    override fun onKeyProvisioned(listener: () -> Unit) {
-        provisionedListener = listener
-    }
-
-    override fun encrypt(plaintext: String, purpose: String): String {
-        val aad = purpose.toByteArray(Charsets.UTF_8)
-        val plain = plaintext.toByteArray(Charsets.UTF_8)
-        // 诊断日志只记「用途 + 明文长度」，绝不打明文/密文本身
-        DiagnosticLog.log(
-            DiagnosticLog.CRYPTO, "encrypt", size = plain.size.toLong(),
-            summary = "purpose=$purpose"
-        )
-        return withRetry {
-            val cipher = Cipher.getInstance(TRANSFORMATION)
-            cipher.init(Cipher.ENCRYPT_MODE, key())
-            cipher.updateAAD(aad)
-            val ciphertext = cipher.doFinal(plain)
-            listOf(
-                PREFIX,
-                Base64.encodeToString(cipher.iv, Base64.NO_WRAP),
-                Base64.encodeToString(ciphertext, Base64.NO_WRAP)
-            ).joinToString(":")
-        }
-    }
+    override fun isEncrypted(stored: String): Boolean = stored.startsWith("$PREFIX:")
 
     override fun decrypt(stored: String, purpose: String): String {
         if (!isEncrypted(stored)) return stored
-        // 诊断日志：解密是「密钥失效」类问题的第一现场（只记用途与长度，不记内容）
+        // 诊断日志：这条路径只在升级后首次读到旧数据时走一次（只记用途与长度，不记内容）
         DiagnosticLog.log(
-            DiagnosticLog.CRYPTO, "decrypt", size = stored.length.toLong(),
+            DiagnosticLog.CRYPTO, "decrypt-legacy", size = stored.length.toLong(),
             summary = "purpose=$purpose"
         )
         val parts = stored.split(':', limit = 4)
@@ -213,182 +189,50 @@ internal class AndroidKeystoreCredentialCipher : CredentialCipher {
         val iv = Base64.decode(parts[2], Base64.NO_WRAP)
         val ciphertext = Base64.decode(parts[3], Base64.NO_WRAP)
         val aad = purpose.toByteArray(Charsets.UTF_8)
-        return withRetry {
-            val cipher = Cipher.getInstance(TRANSFORMATION)
-            cipher.init(Cipher.DECRYPT_MODE, key(expectExisting = true), GCMParameterSpec(GCM_TAG_BITS, iv))
-            cipher.updateAAD(aad)
-            cipher.doFinal(ciphertext).toString(Charsets.UTF_8)
-        }
+        val cipher = Cipher.getInstance(TRANSFORMATION)
+        cipher.init(Cipher.DECRYPT_MODE, legacyKey(), GCMParameterSpec(GCM_TAG_BITS, iv))
+        cipher.updateAAD(aad)
+        return cipher.doFinal(ciphertext).toString(Charsets.UTF_8)
     }
 
-    override fun isEncrypted(stored: String): Boolean = stored.startsWith("$PREFIX:")
-
     /**
-     * 跑一次加解密；遇到「条目坏了」先删掉坏条目，再原样重跑一次。
+     * 取旧版本的 Keystore 密钥（只读）。
      *
-     * ★ 重试必须落在**整段流程**外面（而不是只重试 `key()`）：`doFinal` 的异常也要按密钥故障
-     *   看待——部分机型把「操作初始化失败」推迟到 `doFinal` 才报，只重试取密钥是接不住的。
-     * ★ 重试前必须确认 Keystore **本身可达**（[discardStaleEntry]）：不可达时删键等于把
-     *   用户本来还能读的账号全废掉。
+     * ★ 失败按 [CredentialKeyException] 的口径抛出，让上层能区分「暂时取不到」和「永远解不开」：
+     *   - [CredentialKeyException.Unavailable]：Keystore 本身进不去（设备未解锁 / 服务抖动），
+     *     下次读取就能恢复，上层**必须**保留原数据；
+     *   - [CredentialKeyException.PermanentlyInvalid]：条目已不存在或 blob 无法解密，
+     *     这条旧密文永远解不开 —— 上层据此记「登录状态已失效」提示（见 `DownloadManager`），
+     *     但**依然不清库**：备份导入 / 换机后仍可能救回来。
      */
-    private inline fun <T> withRetry(block: () -> T): T = try {
-        block()
-    } catch (first: Throwable) {
-        if (!isKeyProblem(first)) {
-                    if (first is java.security.GeneralSecurityException || first is java.security.ProviderException || first is java.io.IOException) {
-                        throw CredentialKeyException.Unavailable(describe(first), first)
-                    }
-                    throw first
-                }
-        discardStaleEntry()
-        try {
-            block()
-        } catch (second: Throwable) {
-            throw if (isKeyProblem(second)) PermanentlyInvalid(second) else second
-        }
-    }
-
-    /**
-     * 取密钥：缓存 → Keystore 已有 → 新建。**失败一律转成 [CredentialKeyException]**，
-     * 绝不让 `java.security.InvalidKeyException` 这类裸异常冒到调用方（那是崩溃报告里
-     * 主线程被击穿的根因）。
-     */
-    private fun key(expectExisting: Boolean = false): SecretKey {
-        cachedKey?.let { return it }
-        synchronized(this) {
-            cachedKey?.let { return it }
-            val key = try {
-                loadOrCreateKey(expectExisting)
-            } catch (first: Throwable) {
-                if (!isKeyProblem(first)) {
-                    if (first is java.security.GeneralSecurityException || first is java.security.ProviderException || first is java.io.IOException) {
-                        throw CredentialKeyException.Unavailable(describe(first), first)
-                    }
-                    throw first
-                }
-                discardStaleEntry()
-                try {
-                    loadOrCreateKey(expectExisting)
-                } catch (second: Throwable) {
-                    throw if (isKeyProblem(second)) PermanentlyInvalid(second) else second
-                }
-            }
-            cachedKey = key
-            return key
-        }
-    }
-
-    private fun loadOrCreateKey(expectExisting: Boolean): SecretKey {
-        val keyStore = openKeyStore()
-        (keyStore.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
-        return createKey(notifyLoss = expectExisting || staleEntryDiscarded)
-    }
-
-    private fun openKeyStore(): KeyStore = KeyStore.getInstance(KEYSTORE).apply { load(null) }
-
-    private fun createKey(notifyLoss: Boolean): SecretKey {
-        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE)
-        generator.init(
-            KeyGenParameterSpec.Builder(
-                KEY_ALIAS,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
-            )
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                // ★ 绝不加 setUserAuthenticationRequired(true)：那会让密钥**必然**因锁屏密码变更
-                //   被系统永久作废（KeyPermanentlyInvalidatedException），等于把老用户账号全废掉
-                .setRandomizedEncryptionRequired(true)
-                .build()
-        )
-        val created = generator.generateKey()
-        // ★ 只有真的新建了密钥，才能断定旧密文由另一把密钥加密 → 通知数据层清残留
-        if (notifyLoss) runCatching { provisionedListener?.invoke() }
-        staleEntryDiscarded = false
-        return created
-    }
-
-    /**
-     * 删掉不可用的 Keystore 条目。
-     *
-     * ★ **删之前先确认 Keystore 可达**：如果连 `KeyStore.load` 都进不去（设备还锁着、
-     *   keystore 服务暂时不可用），那「读不到条目」只是**暂时**的，此时删键会把用户
-     *   本来还能解开的凭证全部作废。这种情况抛 [CredentialKeyException.Unavailable]，
-     *   让调用方原样失败、下次再试，而不是毁数据。
-     */
-    private fun discardStaleEntry() {
+    private fun legacyKey(): SecretKey {
         val keyStore = try {
-            openKeyStore()
+            KeyStore.getInstance(KEYSTORE).apply { load(null) }
         } catch (error: Throwable) {
-            throw CredentialKeyException.Unavailable(describe(error), error)
+            throw CredentialKeyException.Unavailable("AndroidKeystore 不可用", error)
         }
-        cachedKey = null
-        staleEntryDiscarded = true
-        runCatching { keyStore.deleteEntry(KEY_ALIAS) }
-            .onFailure { Log.w(TAG, "删除不可用的 Keystore 条目失败：${describe(it)}") }
-        Log.w(TAG, "已删除不可用的 Keystore 条目 $KEY_ALIAS，将生成新密钥")
+        val key = try {
+            keyStore.getKey(KEY_ALIAS, null)
+        } catch (error: Throwable) {
+            throw CredentialKeyException.PermanentlyInvalid("旧密钥条目无法读取", error)
+        }
+        return key as? SecretKey
+            ?: throw CredentialKeyException.PermanentlyInvalid("旧密钥条目已不存在，无法解密历史凭证")
     }
 
-    private fun PermanentlyInvalid(error: Throwable) =
-        CredentialKeyException.PermanentlyInvalid(describe(error), error)
-
-    /**
-     * ★ 注意：companion **不能**声明成 `private` —— [shared] 要给 DAO / GitHubTokenStore /
-     *   DownloadManager 三处用，而 companion 的可见性会**连带限制它自己的成员**
-     *   （`private companion object` 里写 `val shared` ⇒ 报
-     *   `Cannot access 'companion object Companion': it is private`）。
-     *   常量仍然是 private，只有 [shared] 公开给同模块。
-     */
     companion object {
-        const val TAG = "YunX"
-        const val KEYSTORE = "AndroidKeyStore"
-        const val KEY_ALIAS = "yunx.account.credentials.v1"
-        const val TRANSFORMATION = "AES/GCM/NoPadding"
-        const val PREFIX = "yunx:v1"
-        const val GCM_TAG_BITS = 128
+        /** 旧密文前缀：`yunx:v1:<base64(iv)>:<base64(ciphertext)>` */
+        private const val PREFIX = "yunx:v1"
+
+        private const val KEYSTORE = "AndroidKeyStore"
+        private const val KEY_ALIAS = "yunx.account.credentials.v1"
+        private const val TRANSFORMATION = "AES/GCM/NoPadding"
+        private const val GCM_TAG_BITS = 128
 
         /**
-         * ★ **全进程唯一实例**：数据库 DAO、GitHub Token、下载请求头三处必须共用同一个 cipher。
-         *   否则 `cachedKey` 各缓存一份、`provisionedListener` 只有构造者那一个能收到，
-         *   而且「密钥刚被重建」的判断会在几个实例之间错位（一个已换新密钥、一个还拿着坏的）。
+         * ★ **全进程唯一实例**：数据库 DAO、GitHub Token、下载请求头三处共用，保证
+         *   「读到旧密文 → 第一次就识破」的判断口径一致。
          */
-        val shared: CredentialCipher by lazy { AndroidKeystoreCredentialCipher() }
-
-        /**
-         * 哪些异常算「本机密钥故障」。
-         *
-         * ★ 只认**白名单**：不能见错就删键重建。误判的代价是**好密钥被删掉、全部账号真的作废**，
-         *   所以宁可不认：判定不了的一律当普通异常抛给调用方。
-         * ★ **判断顺序有陷阱**：`AEADBadTagException` 是 `GeneralSecurityException` 的子类，
-         *   必须先单独排除它，否则「密文被改 / 跨版本残留」会被误认成密钥故障。
-         */
-        fun isKeyProblem(error: Throwable): Boolean {
-            // 自己包的异常：只有「条目永久不可用」才值得换密钥重试
-            if (error is CredentialKeyException) return error is CredentialKeyException.PermanentlyInvalid
-            // GCM 认证标签不匹配：密文坏了，换密钥也解不开 —— 先于 GeneralSecurityException 判断
-            if (error is AEADBadTagException) return false
-            // 环境根本不支持算法/填充：换密钥同样不行
-            if (error is javax.crypto.NoSuchPaddingException) return false
-            if (error is java.security.NoSuchAlgorithmException) return false
-            // Unknown provider failures may be temporary. Only proven permanent loss permits deletion.
-            var cause: Throwable? = error
-            while (cause != null) {
-                if (cause is android.security.keystore.KeyPermanentlyInvalidatedException) return true
-                if (cause is android.security.keystore.UserNotAuthenticatedException) return false
-                val message = cause.message.orEmpty().lowercase()
-                if (message.contains("temporar") || message.contains("not authenticated") ||
-                    message.contains("locked") || message.contains("unavailable") || message.contains("busy")) return false
-                if (message.contains("invalid key blob") || message.contains("key not found") ||
-                    message.contains("permanently invalidat")) return true
-                cause = cause.cause
-            }
-            return false
-        }
-
-        /** 把机型的原始报错压成一行，附在用户可读文案后面（便于日后对日志） */
-        fun describe(error: Throwable): String {
-            val type = error::class.java.simpleName.ifBlank { "Keystore 异常" }
-            val detail = error.message.orEmpty().replace('\n', ' ').trim()
-            return if (detail.isEmpty()) type else "$type: ${detail.take(160)}"
-        }
+        val shared: CredentialCipher by lazy { PlaintextCredentialCipher() }
     }
 }

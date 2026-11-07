@@ -19,10 +19,14 @@
 package com.yunx.app.data.network
 
 import com.yunx.app.data.network.model.DownloadLink
+import com.yunx.app.data.network.model.FileThumbnail
 import com.yunx.app.data.network.model.QuotaInfo
 import com.yunx.app.data.network.model.ShareExpire
 import com.yunx.app.data.network.model.ShareFile
 import com.yunx.app.data.network.model.ShareInfo
+import com.yunx.app.data.upload.UploadIo
+import com.yunx.app.data.upload.UploadPhase
+import com.yunx.app.data.upload.UploadSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -343,7 +347,16 @@ class GuangYaApi(
             .ifBlank { throw IllegalStateException("光鸭分享链接无效") }
     }
 
-    /** 分享列目录（文档 §4.3）：返回 (文件列表, 下一页游标 or null=无更多)。 */
+    /**
+     * 分享列目录（文档 §4.3）：返回 (文件列表, 下一页游标 or null=无更多)。
+     *
+     * ★ 翻页判定必须三级回落（网页端 `more` 的计算口径）：
+     *   ① 有 `hasMore` 就听它的；② 没有 `hasMore` 但有 `total`，就用「下一页游标的数值偏移 < total」
+     *   （这是网页端的真实口径：total 含被过滤条目，拿可见条数去比会永远翻不完或提前停）；
+     *   ③ 两者都没有，才退回「本页满 100 条且给了游标」。
+     *   旧实现只看 `hasMore` —— 服务端不返回该字段时 `optBoolean` 默认 false，**大目录只会出第一页**
+     *   （>100 项的分享合集后续文件看不到也下不了）。
+     */
     suspend fun listShareFiles(
         accessToken: String,
         parentId: String,
@@ -355,17 +368,28 @@ class GuangYaApi(
             .put("orderBy", 0)
             .put("sortType", 0)
             .put("accessToken", accessToken)
-            .apply { if (!cursor.isNullOrBlank()) put("cursor", cursor) }
+            // 游标在网页端是数值偏移，原样回传数字；只有非数字游标才按字符串发
+            .apply {
+                if (!cursor.isNullOrBlank()) put("cursor", cursor.toLongOrNull() ?: cursor)
+            }
         val json = executeJson(
             businessRequest(GuangYaConstants.SHARE_FILES, body.toString(), device = null, token = null).build()
         )
         checkBusiness(json, "获取分享文件列表失败")
         val data = dataOf(json) ?: return@withContext Pair(emptyList(), null)
         val list = parseFileList(listArray(data))
-        val hasMore = data.optBoolean("hasMore", false)
         val next = data.optString("cursor").takeIf { it.isNotBlank() }
-        val effectiveNext = if (hasMore && next != null) next else if (!hasMore) null else next
-        Pair(list, effectiveNext)
+        val hasMore = when {
+            data.has("hasMore") -> data.optBoolean("hasMore")
+            data.has("total") -> {
+                val total = data.optLong("total", 0L)
+                // 下一页的起始偏移：游标是数字就用它，否则用「已取条数」近似
+                val offset = next?.toLongOrNull() ?: list.size.toLong()
+                total > 0 && offset < total
+            }
+            else -> list.size >= GuangYaConstants.PAGE_SIZE && next != null
+        }
+        Pair(list, if (hasMore) next else null)
     }
 
     /** 分享取下载地址（文档 §4.4）；业务码 207 表示需登录并转存。 */
@@ -394,7 +418,7 @@ class GuangYaApi(
 
     /**
      * 转存分享（文档 §4.5）：body 的 `accessToken` 是**分享访问令牌**（session.stoken），
-     * `Authorization` 用**账号 access token**（参考实现 wenxi `_post(session: session)` 同款）；
+     * `Authorization` 用**账号 access token**（与网页端同款）；
      * 返回含 taskId 时用账号 token 轮询任务状态。
      */
     suspend fun restoreShare(
@@ -494,6 +518,77 @@ class GuangYaApi(
             throw IllegalStateException("光鸭未创建文件夹，请检查是否存在同名文件")
         }
         id
+    }
+
+    // ---------- 上传 ----------
+
+    /**
+     * 上传一个文件到 [parentId] 目录，返回新文件的 fileId。
+     *
+     * 流程：`get_res_center_token` 用整文件 MD5 建任务（`code == 156` 即秒传）→
+     * 用返回的 OSS 临时凭据直传（`fullEndPoint`/`bucketName`/`objectPath` + STS token）→
+     * 轮询 `get_info_by_task_id` 直到拿到 fileId（光鸭是异步校验，不轮询列表里看不到文件）。
+     */
+    suspend fun upload(
+        io: UploadIo,
+        file: UploadSource,
+        parentId: String,
+        accessToken: String
+    ): String = withContext(Dispatchers.IO) {
+        io.progress(UploadPhase.PREPARING)
+        val md5 = io.digest("MD5")
+        val body = JSONObject()
+            .put("capacity", 2)
+            .put("name", file.name)
+            .put("parentId", parentId)
+            .put(
+                "res",
+                JSONObject().put("fileSize", file.size).put("md5", md5)
+            )
+        val json = executeJson(
+            businessRequest(GuangYaConstants.UPLOAD_TOKEN, body.toString(), null, accessToken).build()
+        )
+        val code = json.optString("code")
+        // 156 = 秒传命中：业务上算成功，但 checkBusiness 只认 code 0
+        if (code != "156") checkBusiness(json, "创建上传任务失败")
+        val data = dataOf(json) ?: throw IllegalStateException("光鸭未创建上传任务")
+        val taskId = data.optString("taskId").takeIf { it.isNotBlank() }
+            ?: throw IllegalStateException("光鸭未创建上传任务")
+        if (code != "156") {
+            // 凭据可能平铺在 data，也可能裹在 creds 里
+            fun field(key: String): String = data.optString(key).ifBlank {
+                data.optJSONObject("creds")?.optString(key).orEmpty()
+            }
+            io.ossMultipart(
+                endpoint = data.optString("fullEndPoint").ifBlank { data.optString("endPoint") },
+                bucket = data.optString("bucketName"),
+                objectKey = data.optString("objectPath"),
+                accessKey = field("accessKeyID").ifBlank { field("accessKeyId") },
+                secretKey = field("secretAccessKey"),
+                securityToken = field("sessionToken")
+            )
+        }
+        io.progress(UploadPhase.FINISHING, file.size)
+        repeat(GuangYaConstants.UPLOAD_MAX_POLLS) {
+            val status = executeJson(
+                businessRequest(
+                    GuangYaConstants.UPLOAD_TASK_INFO,
+                    JSONObject().put("taskId", taskId).toString(),
+                    null,
+                    accessToken
+                ).build()
+            )
+            val fileId = dataOf(status)?.optString("fileId").orEmpty()
+            if (fileId.isNotBlank()) return@withContext fileId
+            val statusCode = status.optString("code")
+            if (statusCode.isNotBlank() && statusCode != "0" &&
+                statusCode !in GuangYaConstants.UPLOAD_PENDING_CODES
+            ) {
+                checkBusiness(status, "查询上传结果失败")
+            }
+            delay(GuangYaConstants.UPLOAD_POLL_INTERVAL_MS)
+        }
+        throw IllegalStateException("光鸭正在校验上传内容，请稍后刷新列表")
     }
 
     /** 重命名（文档 §5.3）。 */
@@ -690,7 +785,7 @@ class GuangYaApi(
         }
     }
 
-    /** 列出阵列字段：光鸭不同接口/版本用 list / items / files / records / content 等多种命名（参考实现同款兼容）。 */
+    /** 列出阵列字段：光鸭不同接口/版本用 list / items / files / records / content 等多种命名（逐个兼容）。 */
     private fun listArray(data: JSONObject): JSONArray? =
         data.optJSONArray("list")
             ?: data.optJSONArray("items")
@@ -746,9 +841,22 @@ class GuangYaApi(
             isdir = isDir,
             pdirFid = parent,
             fidToken = "",
-            modifyTime = time
+            modifyTime = time,
+            // 光鸭不同接口的缩略图字段名不统一（个人盘/分享各一套），按出现频率依次兜底；
+            // 逐档校验而不是取第一个非空：字段为 JSON null 时 optString 会给出 "null" 这个字符串。
+            // 图床按网页端 UA + 官网 Referer 防盗链，缺了就是 403
+            thumbnail = FileThumbnail.of(item.optString("thumbnail"), thumbnailHeaders)
+                ?: FileThumbnail.of(item.optString("thumbnailUrl"), thumbnailHeaders)
+                ?: FileThumbnail.of(item.optString("thumbnailURL"), thumbnailHeaders)
+                ?: FileThumbnail.of(item.optString("cover"), thumbnailHeaders)
         )
     }
+
+    /** 光鸭缩略图请求头（与下载同源的网页端 UA + 官网 Referer）；列表项共用同一份，别在循环里现拼 */
+    private val thumbnailHeaders: Map<String, String> = mapOf(
+        "User-Agent" to GuangYaConstants.WEB_UA,
+        "Referer" to GuangYaConstants.DOWNLOAD_REFERER
+    )
 
     private fun checkBusiness(json: JSONObject, fallback: String) {
         if (isSuccess(json)) return
@@ -773,10 +881,10 @@ class GuangYaApi(
         return code.isBlank() || code == "0"
     }
 
-    private fun dataOf(json: JSONObject): JSONObject? {
-        val data = json.optJSONObject("data") ?: return null
-        return data
-    }
+    private fun dataOf(json: JSONObject): JSONObject? =
+        // 业务响应通常裹在 `data` 里，但少数接口（分享摘要等）把字段直接放在顶层。
+        // 只认 `data` 会让顶层返回的接口静默变空（列表空白 / 「分享链接无效」），故回退顶层。
+        json.optJSONObject("data") ?: json.takeIf { it.length() > 0 }
 
     private fun businessRequest(
         url: String,
@@ -811,7 +919,7 @@ class GuangYaApi(
             .url(url)
             .header("X-Client-Id", GuangYaConstants.CLIENT_ID)
             .header("X-Client-Version", GuangYaConstants.CLIENT_VERSION)
-            // 参考实现（wenxi guangya_login.dart）：X-Device-Id / X-Device-Sign 需 URL 编码
+            // X-Device-Id / X-Device-Sign 需 URL 编码（网页端同款）
             .header("X-Device-Id", URLEncoder.encode(deviceId, "UTF-8"))
             .header("X-Device-Model", GuangYaConstants.DEVICE_MODEL)
             .header("X-Device-Name", GuangYaConstants.DEVICE_NAME)
@@ -821,6 +929,11 @@ class GuangYaApi(
             .header("X-Protocol-Version", GuangYaConstants.PROTOCOL_VERSION)
             .header("X-Sdk-Version", GuangYaConstants.SDK_VERSION)
             .header("Accept", "application/json, text/plain, */*")
+            // 登录/发码/刷新这些账号接口同样要带 Origin、Referer、
+            // Accept-Language —— 只带 User-Agent 时风控严格的线路会直接 403 / 参数错误。
+            .header("Origin", GuangYaConstants.WEB_SITE)
+            .header("Referer", GuangYaConstants.WEB_SITE + "/")
+            .header("Accept-Language", "zh-CN")
             .header("User-Agent", GuangYaConstants.WEB_UA)
         if (!token.isNullOrBlank()) builder.header("Authorization", "Bearer $token")
         return if (body == null) {

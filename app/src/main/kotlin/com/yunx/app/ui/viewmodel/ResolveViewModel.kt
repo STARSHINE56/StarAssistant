@@ -15,6 +15,7 @@ import com.yunx.app.data.download.DownloadPlatform
 import com.yunx.app.data.download.DownloadSource
 import com.yunx.app.data.network.BaiduConstants
 import com.yunx.app.data.network.C139Constants
+import com.yunx.app.data.network.C139KoulingParser
 import com.yunx.app.data.network.GuangYaConstants
 import com.yunx.app.data.network.ILanzouConstants
 import com.yunx.app.data.network.LanzouConstants
@@ -1124,6 +1125,65 @@ class ResolveViewModel(
         }
     }
 
+    /**
+     * 仅下载某个视频媒体的**音频**（产物固定是 `.m4a`）。
+     *
+     * ★ 哔哩哔哩 DASH 有**独立音轨**（解析时就一并拿到了 `audioUrl`）：直接下这一路音轨即可，
+     *   体积通常只有视频的几十分之一 —— 这才是真正意义上的「只下音频」。
+     * ★ 其余平台（抖音/快手/小红书/微博/AcFun）只下发一条整段视频直链，平台侧没有音频地址：
+     *   交给下载器下完整段后抽音轨（见 `AudioExtractor`）。流量与下视频一样，但产物是能单独
+     *   播放的 `.m4a`，且不重编码 —— 这是没有独立音轨时唯一不涉及 ffmpeg 的做法。
+     */
+    fun downloadVideoAudio(media: VideoMedia) {
+        val result = (uiState as? ResolveUiState.Video)?.result ?: return
+        if (media.kind != VideoMediaKind.VIDEO) return
+        if (media.url.isBlank() && media.audioUrl.isBlank()) return
+        val index = result.medias.indexOf(media).takeIf { it >= 0 }?.plus(1) ?: 1
+        val name = videoAudioFileName(result.title, media.fileName, index)
+        viewModelScope.launch {
+            try {
+                if (media.audioUrl.isNotBlank()) {
+                    // DASH 独立音轨：请求头与视频轨一致（各平台校验 Referer/Cookie）
+                    downloadManager.enqueue(
+                        url = media.audioUrl,
+                        fileName = name,
+                        headers = media.audioHeaders,
+                        platform = DownloadPlatform.VIDEO
+                    )
+                } else {
+                    // 没有独立音轨：先说清楚会「下完整段视频再抽」，否则用户看到任务体积与视频一样，
+                    // 会以为点错了入口（各平台都没有「只取音频」的请求方式，这是平台侧的限制）
+                    SnackbarController.show("该平台没有独立音频流，会先下完整段视频再提取音轨")
+                    downloadManager.enqueue(
+                        url = media.url,
+                        fileName = name,
+                        headers = media.headers,
+                        size = media.size,
+                        platform = DownloadPlatform.VIDEO,
+                        audioOnly = true
+                    )
+                }
+                downloadStarted = true
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                downloadError = "加入下载任务失败，请稍后重试"
+            }
+        }
+    }
+
+    /**
+     * 音频文件名：沿用视频文件名的主干（解析器已经按作品取过名），后缀统一换成 `.m4a`，
+     * 并加「_音频」后缀 —— 与同作品下过视频时不会互相覆盖，下载页里也一眼看得出是音频。
+     * 多条视频时补序号，避免同名（下载页按文件名分组，重名会串在一起）。
+     */
+    private fun videoAudioFileName(title: String, mediaFileName: String, index: Int): String {
+        val base = mediaFileName.substringBeforeLast('.').takeIf { it.isNotBlank() }
+            ?: title.ifBlank { "video" }.take(40)
+        val unique = if (index > 1) "${base}_$index" else base
+        return "${DownloadPathPolicy.sanitizeName(unique).take(60)}_音频.m4a"
+    }
+
     /** 视频媒体文件名的兜底：`标题_序号.扩展名`（扩展名按媒体类型推断） */
     private fun videoMediaFileName(title: String, index: Int, kind: VideoMediaKind): String {
         val ext = when (kind) {
@@ -1149,32 +1209,50 @@ class ResolveViewModel(
         }
         viewModelScope.launch {
             uiState = ResolveUiState.Loading
-            // 中文口令兜底（既不是分享链接、也不是 GitHub 链接）：**先迅雷，迅雷没给出可用链接再问星海**。
-            // ① 迅雷口令（如「张三丰资源」）：口令是「分享链接 + 提取码」的打包形式，打 shoulei 跳转接口换链接；
-            // ② 星海（夸克/UC 中文口令）：换回 pwd_id，再合成分享链接，后续提取码/登录/列表/取链全走既有链路。
-            // 两个服务都用同一段原文，成功即止；都失败时把原因带出去（而不是只丢一句「无法识别」）。
+            // 口令兜底（既不是分享链接、也不是 GitHub 链接）：
+            // ① 139 云盘口令：先换成官方分享链接，后续完全复用普通 139 分享链路；
+            // ② 迅雷口令（如「张三丰资源」）：口令是「分享链接 + 提取码」的打包形式，打 shoulei 跳转接口换链接；
+            // ③ 星海（夸克/UC 中文口令）：换回 pwd_id，再合成分享链接，后续提取码/登录/列表/取链全走既有链路。
+            // 各服务都用同一段原文，成功即止；都失败时把原因带出去（而不是只丢一句「无法识别」）。
             var effectiveLink = link
+            var effectivePwd = pwd
             var commandError: String? = null
             if (ShareLinkParser.parse(link) == null) {
-                if (XunleiKouling.looksLikeKouling(link)) {
-                    xunleiResolveRepository.resolveKouling(XunleiKouling.normalize(link))
+                val c139Command = C139KoulingParser.parse(link)
+                if (c139Command != null) {
+                    if (effectivePwd.isNullOrBlank()) {
+                        effectivePwd = c139Command.password.ifBlank { null }
+                    }
+                    val c139Account = c139AccountRepository.getAccount()
+                    c139ResolveRepository.resolveKouling(
+                        command = c139Command,
+                        cookie = c139Account?.cookie.orEmpty(),
+                        authorization = c139Account?.authorization
+                    )
                         .onSuccess { effectiveLink = it }
                         .onFailure { commandError = it.message }
-                }
-                if (ShareLinkParser.parse(effectiveLink) == null && StarSeaApi.looksLikeCommand(link)) {
-                    StarSeaApi.resolveToShareLink(link)
-                        .onSuccess { effectiveLink = it }
-                        .onFailure { commandError = it.message }
+                } else {
+                    if (XunleiKouling.looksLikeKouling(link)) {
+                        xunleiResolveRepository.resolveKouling(XunleiKouling.normalize(link))
+                            .onSuccess { effectiveLink = it }
+                            .onFailure { commandError = it.message }
+                    }
+                    if (ShareLinkParser.parse(effectiveLink) == null && StarSeaApi.looksLikeCommand(link)) {
+                        StarSeaApi.resolveToShareLink(link)
+                            .onSuccess { effectiveLink = it }
+                            .onFailure { commandError = it.message }
+                    }
                 }
             }
             val parsed = ShareLinkParser.parse(effectiveLink)
             if (parsed == null) {
-                // 两个口令服务都给不出结果时，用更靠后那次（星海）的原因——它对夸克/UC 口令最准
+                // 口令服务给不出结果时，把最近一次服务的具体原因带出去，而不是只报“无法识别”。
                 uiState = ResolveUiState.Error(commandError ?: "无法识别分享链接")
                 return@launch
             }
             // 口令已换成真实分享链接：收藏 / 复制 / 重新解析都用它，而不是原始口令
             currentLink = effectiveLink
+            currentPwd = effectivePwd
             currentPlatform = parsed.platform
             isGuest = false
             // 游客模式：列目录不要求登录（7 个网盘的分享列表接口都允许匿名，详见 Agent.md §3.19）。
@@ -1182,7 +1260,7 @@ class ResolveViewModel(
             val credential = currentCredential().orEmpty()
             isGuest = credential.isBlank()
             val repo = currentRepo()
-            repo.createSession(effectiveLink, pwd, credential)
+            repo.createSession(effectiveLink, effectivePwd, credential)
                 .onSuccess { s ->
                     session = s
                     currentDirFid = currentDefaultDirFid()

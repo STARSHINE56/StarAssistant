@@ -11,10 +11,12 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.*
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import com.yunx.app.data.network.GitHubApi
 import com.yunx.app.data.network.GitHubTokenStore
 import com.yunx.app.data.network.TokenCheck
+import com.yunx.app.util.AppLinks
 import kotlinx.coroutines.launch
 
 @Composable
@@ -49,6 +51,27 @@ internal fun GitHubTokenDialog(onDismiss: () -> Unit, onChanged: (Boolean) -> Un
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    // 那四步是让人在电脑上手翻路径，手机上翻不动 —— 直接给一个跳到预填好权限的表单的入口
+                    TextButton(
+                        onClick = {
+                            // 与设置页「GitHub 仓库」同一口径：没有可用浏览器就复制链接，不静默失败
+                            if (!AppLinks.openGitHubTokenPage(context)) {
+                                val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                                    as android.content.ClipboardManager
+                                cm.setPrimaryClip(
+                                    android.content.ClipData.newPlainText("yunx_link", AppLinks.GITHUB_TOKEN_PAGE)
+                                )
+                                SnackbarController.show("未找到可用浏览器，链接已复制")
+                            }
+                        },
+                        contentPadding = PaddingValues(0.dp)
+                    ) {
+                        Text(
+                            text = "↗ 从 GitHub 获取 Token",
+                            style = MaterialTheme.typography.bodySmall,
+                            textDecoration = TextDecoration.Underline
+                        )
+                    }
                     Spacer(Modifier.height(8.dp))
                     Text(
                         text = "安全提示：仅给最小权限，勿勾选删除/管理类权限；Token 不明文保存、不上传，清除只需清空后保存。",

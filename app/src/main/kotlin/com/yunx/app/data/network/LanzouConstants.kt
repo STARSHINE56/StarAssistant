@@ -30,6 +30,9 @@ object LanzouConstants {
     const val MYDISK_URL = "https://pc.woozooo.com/mydisk.php"
     const val MYDISK_FILES_URL = "https://pc.woozooo.com/mydisk.php?item=files&action=index"
     const val DOUPLOAD_URL = "https://pc.woozooo.com/doupload.php"
+
+    /** 个人盘上传（multipart 单请求，无分片/秒传；成功后响应 text[0].id 即文件 id） */
+    const val HTML5UP_URL = "https://pc.woozooo.com/html5up.php"
     const val ORIGIN = "https://pc.woozooo.com"
 
     /**
@@ -55,9 +58,16 @@ object LanzouConstants {
     const val FOLDER_PREFIX = "d:"
     const val FILE_PREFIX = "f:"
 
-    /** 域名族：lanzou*、lan[zs]o[ux]，后缀 com/net/org/cn */
+    /**
+     * 域名族：lanzou*、lan[zs]o[ux]、lanzn，后缀 com/net/org/cn。
+     * ★ lanzn 是 2026-10 起在用的新族（issue #197），漏了它 `isLanzouHost` 会把新链接判成非蓝奏。
+     *   必须与 ShareLinkParser.lanzouShareIdRegex 的域名族一致（那边抠 shareId，这边判平台）。
+     */
     private val HOST_REGEX =
-        Regex("""^(?:[a-z0-9-]+\.)*(?:lanzou[a-z]?|lan[zs]o[ux])\.(?:com|net|org|cn)$""", RegexOption.IGNORE_CASE)
+        Regex(
+            """^(?:[a-z0-9-]+\.)*(?:lanzou[a-z]?|lan[zs]o[ux]|lanzn)\.(?:com|net|org|cn)$""",
+            RegexOption.IGNORE_CASE
+        )
 
     fun isLanzouHost(host: String): Boolean = HOST_REGEX.matches(host)
 

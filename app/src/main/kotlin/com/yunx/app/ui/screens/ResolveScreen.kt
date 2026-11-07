@@ -98,6 +98,9 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.yunx.app.data.db.BookmarkEntity
+import com.yunx.app.data.network.C139KoulingParser
+import com.yunx.app.data.network.GitHubLinkParser
 import com.yunx.app.data.network.ShareLinkParser
 import com.yunx.app.data.network.SharePlatform
 import com.yunx.app.data.network.video.VideoLinkParser
@@ -245,23 +248,18 @@ fun ResolveScreen(
                 .orEmpty()
 
         if (text.isEmpty()) return@LaunchedEffect
-
         val shareParsed =
             ShareLinkParser.parse(
                 text
             )
 
+        val c139Parsed = C139KoulingParser.parse(text)
+
+        val parsedPwd = shareParsed?.pwd ?: c139Parsed?.password
         link = text
-
-        pwd =
-            shareParsed
-                ?.pwd
-                .orEmpty()
-
+        pwd = parsedPwd.orEmpty()
         pwdEdited = true
-
-        viewModel.startVideoResolve(text, shareParsed?.pwd)
-
+        viewModel.startVideoResolve(text, parsedPwd)
         onIncomingLinkConsumed()
     }
 
@@ -290,7 +288,8 @@ fun ResolveScreen(
             text != ignoredClipboard &&
             (ShareLinkParser.parse(text) != null || GitHubLinkParser.parse(text) != null ||
                 com.yunx.app.data.network.XunleiKouling.looksLikeKouling(text) ||
-                VideoLinkParser.looksLikeVideoLink(text))
+                VideoLinkParser.looksLikeVideoLink(text) ||
+                C139KoulingParser.parse(text) != null)
         ) {
             clipboardSuggestion = text
         }
@@ -380,9 +379,17 @@ fun ResolveScreen(
             !pwdEdited &&
             pwd.isEmpty()
         ) {
-            ShareLinkParser
-                .parse(link)
-                ?.pwd
+            (
+                ShareLinkParser
+                    .parse(link)
+                    ?.pwd
+                    ?: C139KoulingParser
+                        .parse(link)
+                        ?.password
+                )
+                ?.takeIf {
+                    it.isNotBlank()
+                }
                 ?.let {
                     pwd = it
                 }
@@ -496,6 +503,13 @@ fun ResolveScreen(
                             )
                         },
 
+                        // 上游 v1.3.1 新增：视频行「仅下载音频」（产物 .m4a）
+                        onDownloadAudio = {
+                            viewModel.downloadVideoAudio(
+                                it
+                            )
+                        },
+
                         onDownloadAll = {
                             viewModel.downloadAllVideoMedia()
                         },
@@ -565,7 +579,13 @@ fun ResolveScreen(
                                         clipboardText
                                     )
 
-                                if (parsed == null && GitHubLinkParser.parse(clipboardText) == null && !com.yunx.app.data.network.XunleiKouling.looksLikeKouling(clipboardText)) {
+                                // 上游 v1.3.1 新增：139 云盘口令和普通分享链接同等对待，否则粘进来会被判成「未检测到」
+                                val c139Pasted =
+                                    C139KoulingParser.parse(
+                                        clipboardText
+                                    )
+
+                                if (parsed == null && c139Pasted == null && GitHubLinkParser.parse(clipboardText) == null && !com.yunx.app.data.network.XunleiKouling.looksLikeKouling(clipboardText)) {
                                     SnackbarController.show(
                                         "未检测到支持的分享链接"
                                     )
@@ -574,7 +594,10 @@ fun ResolveScreen(
                                         clipboardText
 
                                     pwd =
-                                        parsed?.pwd
+                                        (
+                                            parsed?.pwd
+                                                ?: c139Pasted?.password
+                                            )
                                             .orEmpty()
 
                                     pwdEdited = true
@@ -586,7 +609,16 @@ fun ResolveScreen(
                                         clipboardText
 
                                     SnackbarController.show(
-                                        "已识别${parsed?.let { platformLabel(it.platform) } ?: if (GitHubLinkParser.parse(clipboardText) != null) "GitHub" else "迅雷口令"}链接"
+                                        "已识别${
+                                            parsed?.let { platformLabel(it.platform) }
+                                                ?: if (GitHubLinkParser.parse(clipboardText) != null) {
+                                                    "GitHub"
+                                                } else if (c139Pasted != null) {
+                                                    SharePlatform.C139.displayName
+                                                } else {
+                                                    "迅雷口令"
+                                                }
+                                        }链接"
                                     )
                                 }
                             }
@@ -714,12 +746,18 @@ fun ResolveScreen(
                         suggestion
                     )
 
+                // 上游 v1.3.1 新增：139 口令（形如「复制整段话…」）也能在这里识别出平台名
+                val c139Parsed =
+                    C139KoulingParser.parse(
+                        suggestion
+                    )
+
                 val githubParsed =
                     GitHubLinkParser.parse(
                         suggestion
                     )
 
-                // 统一识别：先视频、再 GitHub、最后网盘（与解析入口的分流顺序一致）
+                // 统一识别：先视频、再 GitHub、再 139 口令、最后网盘（与解析入口的分流顺序一致）
                 val videoParsed =
                     VideoLinkParser.parse(
                         suggestion
@@ -730,6 +768,7 @@ fun ResolveScreen(
                         videoParsed != null -> videoParsed.platform.displayName
                         githubParsed != null -> "GitHub"
                         parsed != null -> platformLabel(parsed.platform)
+                        c139Parsed != null -> SharePlatform.C139.displayName
                         else -> "网盘"
                     }
 
@@ -738,8 +777,14 @@ fun ResolveScreen(
                         videoParsed != null -> videoParsed.platform.logoRes()
                         githubParsed != null -> SharePlatform.GITHUB.logoRes()
                         parsed != null -> parsed.platform.logoRes()
+                        c139Parsed != null -> SharePlatform.C139.logoRes()
                         else -> null
                     }
+
+                // 提取码：网盘分享码优先，没有就用 139 口令里带的密码
+                val parsedPwd =
+                    parsed?.pwd
+                        ?: c139Parsed?.password
 
                 ClipboardSuggestCard(
                     platformName =
@@ -753,12 +798,9 @@ fun ResolveScreen(
                             suggestion
 
                         pwd =
-                            parsed
-                                ?.pwd
-                                .orEmpty()
+                            parsedPwd.orEmpty()
 
                         pwdEdited = true
-
                         ignoredClipboard =
                             suggestion
 
@@ -1102,7 +1144,7 @@ private fun ResolveInputContent(
                         placeholder = {
                             Text(
                                 text =
-                                    "粘贴网盘分享链接……",
+                                    "粘贴网盘分享链接 / 视频链接 / 迅雷口令 / 139 云盘口令……",
 
                                 style =
                                     MaterialTheme

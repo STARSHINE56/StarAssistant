@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Bookmarks
 import androidx.compose.material.icons.outlined.Campaign
+import androidx.compose.material.icons.outlined.SwapVert
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -55,6 +56,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.lifecycle.viewmodel.compose.viewModel
 import android.content.res.Configuration
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -113,6 +116,7 @@ import com.yunx.app.data.download.DownloadManager
 import com.yunx.app.data.backup.AuthBackupManager
 import com.yunx.app.data.network.BaiduApi
 import com.yunx.app.data.network.C139Api
+import com.yunx.app.data.network.C139DeviceInfo
 import com.yunx.app.data.network.Pan123Api
 import com.yunx.app.data.network.QuarkApi
 import com.yunx.app.data.network.UCApi
@@ -170,6 +174,7 @@ import com.yunx.app.ui.viewmodel.QuarkAccountViewModel
 import com.yunx.app.ui.viewmodel.QuarkCloudViewModel
 import com.yunx.app.ui.viewmodel.ResolveViewModel
 import com.yunx.app.ui.viewmodel.VideoAccountViewModel
+import com.yunx.app.util.AppLinks
 import com.yunx.app.ui.viewmodel.UCCoudViewModel
 import com.yunx.app.ui.viewmodel.UCAccountViewModel
 import com.yunx.app.ui.viewmodel.XunleiAccountViewModel
@@ -210,6 +215,12 @@ fun MainScreen(
     onIncomingAddUrlConsumed: () -> Unit = {}
 ) {
     var currentTab by rememberSaveable { mutableStateOf(MainTab.Resolve) }
+
+    // 账号页顶栏「排序」：弹窗和网盘列表都在 DriveScreen，但入口按钮画在全局顶栏，
+    // 所以开关状态提升到本层（弹窗内容由 DriveScreen 渲染）。
+    var showDriveSort by rememberSaveable { mutableStateOf(false) }
+    // 账号页是否正停在某个网盘的浏览子页：子页打开时隐藏「排序」按钮（它只属于账号列表）
+    var driveSubPageOpen by rememberSaveable { mutableStateOf(false) }
 
     // 实况通知等外部来源请求切 Tab：读一次即消费（清空由调用方做）
     LaunchedEffect(openTab) {
@@ -286,7 +297,10 @@ fun MainScreen(
     val ucApi = remember { UCApi() }
     val xunleiApi = remember { XunleiApi() }
     val baiduApi = remember { BaiduApi() }
-    val c139Api = remember { C139Api() }
+    val appContext = context.applicationContext
+    val c139Api = remember(appContext) {
+        C139Api(deviceInfoProvider = { C139DeviceInfo.from(appContext) })
+    }
     val pan123Api = remember { Pan123Api() }
     val pan115Api = remember { Pan115Api() }
     val guangyaApi = remember { GuangYaApi() }
@@ -1064,6 +1078,17 @@ fun MainScreen(
 
                     else -> Unit
                 }
+                // 账号页标题右上角：网盘列表排序 / 隐藏未登录
+                // ★ 只在账号列表上显示：进了某个网盘的浏览子页时排序没有意义，
+                //   由 DriveScreen 通过 onSubPageChange 通知本层隐藏。
+                if (currentTab == MainTab.Drive && !driveSubPageOpen) {
+                    IconButton(onClick = { showDriveSort = true }) {
+                        Icon(
+                            imageVector = Icons.Outlined.SwapVert,
+                            contentDescription = "排序网盘"
+                        )
+                    }
+                }
             },
             scrollBehavior = scrollBehavior,
             colors = TopAppBarDefaults.topAppBarColors(
@@ -1173,7 +1198,11 @@ fun MainScreen(
                         onVideoSetPrimary = { platform, id -> videoAccountViewModel.setPrimary(platform, id) },
                         onVideoRename = { id, remark -> videoAccountViewModel.updateRemark(id, remark) },
                         onVideoRemove = { id -> videoAccountViewModel.remove(id) },
-                        onVideoRemoveAll = { platform -> videoAccountViewModel.removeAll(platform) }
+                        onVideoRemoveAll = { platform -> videoAccountViewModel.removeAll(platform) },
+                        // 顶栏「排序」入口：弹窗、顺序与隐藏开关都由 DriveScreen 渲染
+                        showSortDialog = showDriveSort,
+                        onDismissSortDialog = { showDriveSort = false },
+                        onSubPageChange = { driveSubPageOpen = it }
                     )
                     MainTab.Download -> DownloadScreen(
                         scrollBehavior,

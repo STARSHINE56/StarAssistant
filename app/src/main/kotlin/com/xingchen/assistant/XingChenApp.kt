@@ -23,13 +23,27 @@ class XingChenApp : Application() {
         val engine = com.yunx.app.data.gopeed.GopeedEngine
         engine.syncInstalledState(this)
         val settings = com.yunx.app.data.prefs.SettingsRepository(this)
-        com.yunx.app.data.network.HttpClients.setProxy(
-            settings.proxyHost.takeIf { settings.proxyEnabled && it.isNotBlank() }, settings.proxyPort)
+        // 恢复用户配置的 HTTP 代理（任何异常都不得影响应用启动）
+        runCatching {
+            com.yunx.app.data.network.HttpClients.setProxy(
+                settings.proxyHost.takeIf { settings.proxyEnabled && it.isNotBlank() }, settings.proxyPort)
+        }
         if (settings.downloadEngine == com.yunx.app.data.prefs.SettingsRepository.ENGINE_GOPEED && engine.isInstalled(this)) {
             Thread { runCatching { engine.start(this, engine.resolveDownloadDir(this)) } }.start()
         }
         Thread { runCatching { com.yunx.app.data.download.DownloadSaver.purgeOwnPendingFiles(this) } }.start()
         // 迅雷动态设备指纹：首次启动生成并持久化（开源分发后每台设备独立指纹）
         com.yunx.app.data.network.XunleiDeviceFingerprint.init(this)
+    }
+
+    /**
+     * 内存压力回调：系统回收前先释放「可再生」的内存 —— 空闲 HTTP 连接及其 socket/Conspression 缓冲。
+     * 分片下载的数据全部流式落盘、不在堆上缓存，所以这里只丢弃空闲连接，不会影响进行中的下载。
+     */
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+            com.yunx.app.data.network.HttpClients.evictIdleConnections()
+        }
     }
 }
