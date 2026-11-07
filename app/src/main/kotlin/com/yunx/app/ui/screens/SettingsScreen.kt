@@ -47,7 +47,6 @@ import androidx.compose.material.icons.outlined.SwitchAccount
 import androidx.compose.material.icons.outlined.SystemUpdate
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.Wifi
-import androidx.compose.material.icons.outlined.VolunteerActivism
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -117,7 +116,6 @@ fun SettingsScreen(
     scrollBehavior: TopAppBarScrollBehavior,
     onThemeClick: () -> Unit,
     onAboutClick: () -> Unit,
-    onSupportClick: () -> Unit,
     backupManager: AuthBackupManager,
     onGopeedClick: () -> Unit = {},
 
@@ -669,15 +667,6 @@ fun SettingsScreen(
             ),
             description = "版本信息、支持平台与技术说明",
             onClick = onAboutClick
-        )
-
-        Spacer(modifier = Modifier.height(6.dp))
-
-        SettingsItem(
-            icon = Icons.Outlined.VolunteerActivism,
-            title = "支持开发",
-            description = "微信扫码捐赠，支持项目持续维护",
-            onClick = onSupportClick
         )
     }
 

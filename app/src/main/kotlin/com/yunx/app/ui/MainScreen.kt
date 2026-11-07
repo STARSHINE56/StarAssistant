@@ -156,7 +156,6 @@ import com.yunx.app.ui.screens.DriveScreen
 import com.yunx.app.ui.screens.OnboardingScreen
 import com.yunx.app.ui.screens.ResolveScreen
 import com.yunx.app.ui.screens.SettingsScreen
-import com.yunx.app.ui.screens.SupportScreen
 import com.yunx.app.ui.screens.ThemeScreen
 import com.yunx.app.ui.screens.UpdateDialog
 import com.yunx.app.ui.viewmodel.BaiduAccountViewModel
@@ -230,7 +229,6 @@ fun MainScreen(
     var showC139Login by rememberSaveable { mutableStateOf(false) }
     var showPan123Login by rememberSaveable { mutableStateOf(false) }
     var showAbout by rememberSaveable { mutableStateOf(false) }
-    var showSupport by rememberSaveable { mutableStateOf(false) }
     var showTheme by rememberSaveable { mutableStateOf(false) }
     var showBookmarks by rememberSaveable { mutableStateOf(false) }
     var showDownloadHistory by rememberSaveable { mutableStateOf(false) }
@@ -1192,7 +1190,6 @@ fun MainScreen(
                         scrollBehavior = scrollBehavior,
                         onThemeClick = { showTheme = true },
                         onAboutClick = { showAbout = true },
-                        onSupportClick = { showSupport = true },
                         backupManager = backupManager,
                         onGopeedClick = { showGopeed = true },
                         onLinkOpenClick = { showLinkOpen = true },
@@ -1309,17 +1306,7 @@ fun MainScreen(
         )
     }
 
-    // 支持开发：叠加覆盖层（淡入 + 轻微缩放过渡）
-    AnimatedVisibility(
-        visible = showSupport,
-        enter = fadeIn(tween(220)) + scaleIn(tween(220), initialScale = 0.96f),
-        exit = fadeOut(tween(160)) + scaleOut(tween(160), targetScale = 0.96f),
-        modifier = Modifier.fillMaxSize()
-    ) {
-        SupportScreen(
-            onBack = { showSupport = false }
-        )
-    }
+    // (「支持开发」覆盖层已随赞助功能一起删除)
 
     // 主题与外观：叠加覆盖层（淡入 + 轻微缩放过渡）
     AnimatedVisibility(

@@ -101,7 +101,6 @@ class SettingsDirectoryPickerTest {
                                 onThemeClick = {},
                                 onAboutClick = {},
                                 onGopeedClick = {},
-                                onSupportClick = {},
                                 // 链接唤起页入口（深链接注册项开关页），此用例不涉及
                                 onLinkOpenClick = {},
                                 // 多账号下载页入口（实验性开关页），此用例不涉及
