@@ -1,6 +1,6 @@
 package com.yunx.app.data.download
 
-import android.util.Log
+import java.util.logging.Logger
 import com.yunx.app.data.network.HttpClients
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -16,7 +16,7 @@ import kotlin.coroutines.coroutineContext
 
 /** Bounded HLS downloader that never forwards credentials across origins. */
 object HlsDownloader {
-    private const val TAG = "YunX-HLS"
+    private val logger = Logger.getLogger("YunX-HLS")
     private const val MAX_REDIRECTS = 5
     private const val MAX_PLAYLIST_BYTES = 1024 * 1024L
     private const val MAX_SEGMENTS = 20_000
@@ -37,7 +37,7 @@ object HlsDownloader {
         onBytes: suspend (Long) -> Unit
     ): Boolean = withContext(Dispatchers.IO) {
         val credentialOrigin = HlsRequestPolicy.initialUrl(url) ?: run {
-            Log.w(TAG, "拒绝非 HTTPS 或无效的 HLS 地址")
+            logger.warning("拒绝非 HTTPS 或无效的 HLS 地址")
             return@withContext false
         }
 
@@ -48,7 +48,7 @@ object HlsDownloader {
             else fetchText(mediaUrl, credentialOrigin, headers) ?: return@runCatching false
 
             if (media.text.contains("#EXT-X-KEY") || media.text.contains("#EXT-X-BYTERANGE")) {
-                Log.w(TAG, "HLS 含不支持的加密或 BYTERANGE")
+                logger.warning("HLS 含不支持的加密或 BYTERANGE")
                 return@runCatching false
             }
 
@@ -76,13 +76,13 @@ object HlsDownloader {
                         onBytes(bytes)
                     } ?: return@runCatching false
                     if (wrote <= 0) return@runCatching false
-                    if (index % 10 == 0) Log.d(TAG, "HLS 分片 ${index + 1}/${segments.size}")
+                    if (index % 10 == 0) logger.fine("HLS 分片 ${index + 1}/${segments.size}")
                 }
-                Log.d(TAG, "HLS 下载完成 segments=${segments.size} size=$total")
+                logger.fine("HLS 下载完成 segments=${segments.size} size=$total")
             }
             true
         }.onFailure {
-            Log.e(TAG, "HLS 下载失败: ${it.message}")
+            logger.warning("HLS 下载失败（不输出请求地址或认证）")
         }.getOrDefault(false).also { success ->
             if (!success) destFile.delete()
         }

@@ -1,6 +1,7 @@
 [versions]
 agp = "8.13.0"
 kotlin = "2.1.0"
+composeDesktop = "1.7.3"
 coreKtx = "1.17.0"
 webkit = "1.12.1"   # 登录 WebView：关闭 X-Requested-With + 同步桌面 client hints（UserAgentMetadata）
                     # ★ 钉在 1.12.1：星辰 minSdk 保持 23，而 webkit 1.13+ 起要求 minSdk 24（清单合并会直接失败）
@@ -20,6 +21,8 @@ coil = "3.0.4"        # 图片加载（含网络模块，见 androidx-coil-netwo
 mp4parser = "1.1.22"  # mp4 分轨合并（哔哩哔哩 DASH 音视频合轨）；纯 Java，无需 ffmpeg
 
 [plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+compose-desktop = { id = "org.jetbrains.compose", version.ref = "composeDesktop" }
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

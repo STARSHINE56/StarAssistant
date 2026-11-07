@@ -18,7 +18,6 @@
 
 package com.yunx.app.data.network
 
-import android.util.Base64
 import com.yunx.app.data.network.model.DownloadLink
 import com.yunx.app.data.network.model.QuotaInfo
 import com.yunx.app.data.network.model.ShareExpire
@@ -643,7 +642,7 @@ class Pan123Api(
         // 形态 1：整段 base64（不含协议头的串）
         if (!trimmed.contains("://")) {
             return runCatching {
-                String(Base64.decode(trimmed, Base64.DEFAULT), Charsets.UTF_8)
+                String(WireBase64.decode(trimmed, WireBase64.DEFAULT), Charsets.UTF_8)
                     .takeIf { it.startsWith("http", ignoreCase = true) }
             }.getOrNull()
         }
@@ -653,7 +652,7 @@ class Pan123Api(
         val params = trimmed.substring(idx + "params=".length).substringBefore("&")
         return runCatching {
             val normalized = params.replace('-', '+').replace('_', '/')
-            String(Base64.decode(normalized, Base64.DEFAULT), Charsets.UTF_8)
+            String(WireBase64.decode(normalized, WireBase64.DEFAULT), Charsets.UTF_8)
         }.getOrNull()
     }
 
