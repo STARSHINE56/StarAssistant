@@ -67,7 +67,15 @@ data class C139DeviceInfo(
             val appContext = context.applicationContext
             val metrics = appContext.resources.displayMetrics
             val configuration = appContext.resources.configuration
-            val locale = runCatching { configuration.locales[0] }.getOrDefault(Locale.getDefault())
+            // Configuration#locales 是 API 24 起才有的，本模块 minSdk = 23；API 23 只能读已废弃的单语言字段。
+            // lint 的 NewApi 检查认得 SDK_INT 守卫，写成两个分支就不会再报错（运行时也不会 NoSuchMethodError）。
+            @Suppress("DEPRECATION")
+            val legacyLocale = configuration.locale
+            val locale = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                configuration.locales.firstOrNull() ?: legacyLocale ?: Locale.getDefault()
+            } else {
+                legacyLocale ?: Locale.getDefault()
+            }
             val osVersion = Build.VERSION.RELEASE.takeIf { it.isNotBlank() }
                 ?: Build.VERSION.SDK_INT.toString()
             return C139DeviceInfo(
